@@ -593,7 +593,7 @@ def write_buffers():
 		anm.write(make_anm())
 	
 	if camera_exists():
-		cam_filename = f'{action_name}_cam.camera'
+		cam_filename = "camera01.camera"
 		with open(f'{anm_path}\\{cam_filename}', 'wb+') as cam:
 			cam.write(make_camera())
 
@@ -606,9 +606,9 @@ def write_json():
 
 	if camera_exists():
 		cam_path = animated_armatures[0].chunk_path
-		cam_name = f'{animated_armatures[0].name}_cam'
+		cam_name = "camera01"
 
-		cam_chunk: Dict = make_chunk_dict(cam_path, cam_name, "nuccChunkCamera", reference=False)
+		cam_chunk: Dict = make_chunk_dict(cam_path, cam_name, "nuccChunkCamera", reference=False, file=False)
 		chunk_maps.append(cam_chunk)
 
 		cam_file_chunk: Dict = make_chunk_dict(cam_path, cam_name, "nuccChunkCamera", reference=False, file=True)
