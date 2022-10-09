@@ -26,7 +26,7 @@ def convert_to_anm_values(data_path: str, values: list, loc: Vector, rot: Quater
         return list(map(lambda x: pos_m_to_cm_tuple((x)[:]), values))
 
     if data_path == 'rotation_euler':
-        return list(map(lambda x: rot_from_blender((rot @ x.to_quaternion().inverted()).to_euler('ZYX')[:]), values))
+        return list(map(lambda x: rot_from_blender((x.to_quaternion() @ rot).to_euler('ZYX')[:]), values))
 
     if data_path == 'rotation_quaternion':
         converted = list(map(lambda x: (rot @ x).inverted(), values))
@@ -39,7 +39,7 @@ def convert_to_anm_values(data_path: str, values: list, loc: Vector, rot: Quater
         return list(map(lambda x: tuple([int(y * 0x4000) for y in x]), converted))
 
     if data_path == 'rotation_quaternion_euler':
-        return list(map(lambda x: rot_from_blender((x.to_quaternion() @ rot.inverted()).to_euler('ZYX')[:]), values))
+        return list(map(lambda x: rot_from_blender((x.to_quaternion() @ rot).to_euler('ZYX')[:]), values))
 
     if data_path == 'scale' and len(values) < 2:
         return list(map(lambda x: (Vector(([abs(y) for y in x])) * sca )[:], values))
