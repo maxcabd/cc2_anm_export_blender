@@ -35,7 +35,7 @@ def convert_to_anm_values(data_path: str, values: list, loc: Vector, rot: Quater
 
     if data_path == 'rotation_quaternion_camera':
         converted = list(map(lambda x: (rot).inverted(), values))
-        converted = list(map(lambda rot: (-rot.x, -rot.y, -rot.z, rot.w), values))
+        converted = list(map(lambda rot: (-rot.x, -rot.y, -rot.z, rot.w), converted))
         return list(map(lambda x: tuple([int(y * 0x4000) for y in x]), converted))
 
     if data_path == 'rotation_quaternion_euler':
