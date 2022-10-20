@@ -7,7 +7,7 @@ def get_edit_matrix(armature: Armature, bone_name: str) -> Matrix:
 	Get the edit / rest bone matrix. 
 	"""
 	
-	# https://github.com/SutandoTsukai181/cc2_xfbin_blender/blob/anm_wip/blender/importer.py
+	# Implementation by https://github.com/SutandoTsukai181
 
 	if armature is not None:
 		bpy.context.view_layer.objects.active = armature
