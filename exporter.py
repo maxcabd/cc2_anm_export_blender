@@ -12,18 +12,22 @@ sys.path.append(directory)
 
 from br.br_anm import *
 from br.br_camera import Camera
+from br.br_lightdirc import LightDirc
+from br.br_lightpoint import LightPoint
+from br.br_ambient import Ambient
+
 from common.bone_props import *
-from common.armature_props import *
+from common.armature_props import AnmArmature
+from common.light_props import get_lights
 from common.coordinate_converter import *
 from common.helpers import *
 
 
-
 is_looped = False # Set to true if your animation should be looped
-
+lightpoint_index = -1
 
 def camera_exists() -> bool:
-	""" Return true if Camera exists AND has animation data."""
+	""" Return True if Camera exists AND has animation data, and False otherwise."""
 	cam = bpy.context.scene.camera
 
 	if cam and cam.animation_data: 
@@ -31,6 +35,14 @@ def camera_exists() -> bool:
 	else: 
 		return False
 
+def light_exists() -> bool:
+	"""Returns True if a lightDirc or lightPoint or Ambient object exists, and False otherwise."""
+	lights = get_lights()
+
+	for light in lights:
+		if light['type'] == "SUN" or light['type'] == "POINT" or light['type'] == "AREA":
+			return True
+	return False
 
 def get_anm_armatures() -> List[Armature]:
 	"""
@@ -49,7 +61,6 @@ def get_anm_armatures() -> List[Armature]:
 
 # Animated armature objects which are special objects with .anm properties
 animated_armatures = list(map(lambda x: AnmArmature(x), get_anm_armatures()))
-
 
 def make_mapping_reference(types=False) -> List[str]:
 	"""
@@ -71,6 +82,7 @@ def make_mapping_reference(types=False) -> List[str]:
 	else:
 		for armature_obj in animated_armatures:
 			extra_mapping_reference.extend([armature_obj.models[0], *armature_obj.bones, *armature_obj.materials, *armature_obj.models])
+
 		return extra_mapping_reference
 		
 
@@ -139,6 +151,172 @@ def make_coord_parent() -> CoordParent:
 	return CoordParent(anm_coords)
 
 
+def add_curve(curve_format: AnmCurveFormat, curve_index: int, curve_size: int, frame_count: int, values: List, curve_headers: List[CurveHeader], curves: List[Curve]):
+	"""
+	Add curve to curve_headers and curves list.
+	"""
+	curve = Curve(curve_format, values)
+	curves.append(curve)
+	curve_header = CurveHeader(curve_index, curve_format.value, frame_count, curve_size)
+	curve_headers.append(curve_header)
+
+def make_entry_light(light_index: int) -> Entry:
+	"""
+	Make .anm Entry struct for lightPoint and LightDirc object.. 
+	"""
+	curve_headers: List[CurveHeader] = list()
+	curves: List[Curve] = list()
+
+	light = get_lights()[light_index]
+
+	light_type = light['type']
+	light_color_values = light['color']
+	light_strength_values = light['strength']
+	light_pos_values = light['matrix_world']
+	light_rot_values = light['matrix_world_rotation']
+	
+
+	if (light_type == "POINT"):
+		light_radius_1_values = light['size']
+		light_radius_2_values = light['size_2']
+
+		# Combine the color, strength, and rotation values into one list so we can use an index to create the curves
+		light_values = {
+			'color': light_color_values,
+			'strength': light_strength_values,
+			'position': light_pos_values,
+			'radius_1': light_radius_1_values,
+			'radius_2': light_radius_2_values
+		}
+
+		# Create curves for each value
+		for index, (key, values) in enumerate(light_values.items()):
+			if key == 'color':
+				converted_values = [[value * 255 for value in sublist] for sublist in light_values[key]]
+				chained_values = chain_list(converted_values)
+				frame_count = len(converted_values)
+
+				if len(converted_values) % 4 != 0:
+					# Pad the list with the last value so the length is a multiple of 4
+					chained_values += converted_values[-1] * (4 - len(converted_values) % 4)
+					frame_count = len(converted_values) + (4 - len(converted_values) % 4)
+				add_curve(AnmCurveFormat.BYTE3, index, 24, frame_count, chained_values, curve_headers, curves)
+			
+			if key == 'strength':
+				converted_values = convert_light_values('light_strength', light_values[key])
+				add_curve(AnmCurveFormat.FLOAT1ALT, index, 4, len(converted_values), converted_values, curve_headers, curves)
+			
+			if key == 'position':
+				keyframe_vec3 = dict()
+				converted_values = convert_light_values('light_pos', light_pos_values)
+
+				if len(light_pos_values) > 1:
+					for frame, value in enumerate(converted_values):
+						keyframe_vec3[frame * 100] = value
+
+					keyframe_vec3.update({-1: [*keyframe_vec3.values()][-1]}) # Add null key
+
+					frame_count = len(light_pos_values) + 1
+					add_curve(AnmCurveFormat.INT1_FLOAT3, index, 24, frame_count, keyframe_vec3, curve_headers, curves)
+			
+			if key == 'radius_1':
+				converted_values = convert_light_values('light_radius', light_radius_1_values)
+				frame_count = len(converted_values)
+				add_curve(AnmCurveFormat.FLOAT1ALT, index, 24, frame_count, converted_values, curve_headers, curves)
+
+			if key == 'radius_2':
+				converted_values = convert_light_values('light_radius', light_radius_2_values)
+				frame_count = len(converted_values)
+				add_curve(AnmCurveFormat.FLOAT1ALT, index, 24, frame_count, converted_values, curve_headers, curves)
+
+		# Create the entry
+		clump_index = -1
+		coord_index = light_index
+		entry_format = EntryFormat.LIGHTPOINT # LightPoint
+		curve_count = len(curve_headers)
+
+		entry = Entry(clump_index, coord_index, entry_format, curve_count, curve_headers, curves)
+
+		
+	if (light_type == "SUN"):
+		# Combine the color, strength, and rotation values into one list so we can use an index to create the curves
+		light_values = {
+			'color': light_color_values,
+			'strength': light_strength_values,
+			'rotation': light_rot_values
+		}
+
+		# Create the curves
+		for index, (key, values) in enumerate(light_values.items()):
+			if key == 'color':
+				converted_values = [[value * 255 for value in sublist] for sublist in light_values[key]]
+				chained_values = chain_list(converted_values)
+				frame_count = len(converted_values)
+
+				if len(converted_values) % 4 != 0:
+					# Pad the list with the last value so the length is a multiple of 4
+					chained_values += converted_values[-1] * (4 - len(converted_values) % 4)
+					frame_count = len(converted_values) + (4 - len(converted_values) % 4)
+				add_curve(AnmCurveFormat.BYTE3, index, 24, frame_count, chained_values, curve_headers, curves)
+
+			if key == 'strength':
+				converted_values = convert_light_values('light_strength', light_values[key])
+				frame_count = len(converted_values)
+				add_curve(AnmCurveFormat.FLOAT1ALT, index, 24, frame_count, converted_values, curve_headers, curves)
+			
+			if key == 'rotation':
+				if len(light_values[key]) < 2:
+					converted_values = convert_light_values('light_rot_euler', light_values[key])
+					frame_count = len(converted_values)
+					add_curve(AnmCurveFormat.FLOAT3ALT, index, 24, frame_count, converted_values, curve_headers, curves)
+				else:
+					converted_values = convert_light_values('light_rot', light_values[key])
+					frame_count = len(converted_values)
+					add_curve(AnmCurveFormat.SHORT4, index, 24, frame_count, converted_values, curve_headers, curves)
+
+		# Create the entry
+		clump_index = -1
+		coord_index = light_index
+		entry_format = EntryFormat.LIGHTDIRECTION
+		curve_count = len(curve_headers)
+
+		entry = Entry(clump_index, coord_index, entry_format.value, curve_count, curve_headers, curves)
+
+	if (light_type == "AREA"):
+		# Combine the color, strength, and rotation values into one list so we can use an index to create the curves
+		light_values = {
+			'color': light_color_values,
+			'strength': light_strength_values
+		}
+
+		# Create the curves
+		for index, (key, values) in enumerate(light_values.items()):
+			if key == 'color':
+				converted_values = [[value * 255 for value in sublist] for sublist in light_values[key]]
+				chained_values = chain_list(converted_values)
+				frame_count = len(converted_values)
+
+				if len(converted_values) % 4 != 0:
+					# Pad the list with the last value so the length is a multiple of 4
+					chained_values += converted_values[-1] * (4 - len(converted_values) % 4)
+					frame_count = len(converted_values) + (4 - len(converted_values) % 4)
+				add_curve(AnmCurveFormat.BYTE3, index, 24, frame_count, chained_values, curve_headers, curves)
+
+			if key == 'strength':
+				converted_values = convert_light_values('light_strength', light_values[key])
+				frame_count = len(converted_values)
+				add_curve(AnmCurveFormat.FLOAT1ALT, index, 24, frame_count, converted_values, curve_headers, curves)
+
+		# Create the entry
+		clump_index = -1
+		coord_index = light_index
+		entry_format = EntryFormat.AMBIENT
+		curve_count = len(curve_headers)
+
+		entry = Entry(clump_index, coord_index, entry_format.value, curve_count, curve_headers, curves)
+
+	return entry
+
 
 def make_entry_camera() -> Entry:
 	"""
@@ -164,7 +342,6 @@ def make_entry_camera() -> Entry:
 
 		channel_values.append(list(map(lambda key: fcurves_cam[i].evaluate(key), keyframes)))
 
-
 	for data_path, keyframe_count in data_paths.items():
 		if data_path == 'location':
 				keyframe_vec3 = dict()
@@ -182,27 +359,10 @@ def make_entry_camera() -> Entry:
 						keyframe_vec3[frame * 100] = value
 			
 					keyframe_vec3.update({-1: [*keyframe_vec3.values()][-1]}) # Add null key
-
-					curve = Curve(AnmCurveFormat.INT1_FLOAT3, keyframe_vec3)
-					curves.append(curve)
-
-					curve_header = CurveHeader(
-											list(data_paths).index(data_path), 
-											AnmCurveFormat.INT1_FLOAT3.value, 
-											keyframe_count + 1,  # Add 1 more to frame count for null key
-											12)
-					curve_headers.append(curve_header)
+					add_curve(AnmCurveFormat.INT1_FLOAT3, list(data_paths).index(data_path), 12, keyframe_count + 1, keyframe_vec3, curve_headers, curves)
+					
 				else:
-					curve = Curve(AnmCurveFormat.FLOAT3, converted_values)
-					curves.append(curve)
-
-					curve_header = CurveHeader(
-									list(data_paths).index(data_path), 
-									AnmCurveFormat.FLOAT3.value, 
-									len(converted_values), 
-									12)
-					curve_headers.append(curve_header)
-
+					add_curve(AnmCurveFormat.FLOAT3, list(data_paths).index(data_path), 12, keyframe_count, converted_values, curve_headers, curves)
 					
 		if data_path == 'rotation_euler':
 			if keyframe_count < 2:
@@ -213,28 +373,12 @@ def make_entry_camera() -> Entry:
 					channel_values[5]))
 
 				converted_values = convert_to_anm_values(data_path, values, loc, rot, sca)
+				add_curve(AnmCurveFormat.FLOAT3ALT, list(data_paths).index(data_path), 24, len(converted_values), converted_values, curve_headers, curves)
 
-				curve = Curve(AnmCurveFormat.FLOAT3ALT, converted_values)
-				curves.append(curve)
-
-				curve_header = CurveHeader(
-										list(data_paths).index(data_path), 
-										AnmCurveFormat.FLOAT3ALT.value, 
-										len(converted_values), 
-										24)
-				curve_headers.append(curve_header)
 			else:
 				quaternion_values = list(map(lambda x: x.to_quaternion(), values))
 				converted_values = convert_to_anm_values('rotation_quaternion', quaternion_values, loc, rot, sca)
-
-				curve = Curve(AnmCurveFormat.SHORT4, converted_values)
-				curves.append(curve)
-				curve_header = CurveHeader(
-										list(data_paths).index(data_path), 
-										AnmCurveFormat.SHORT4.value, 
-										len(converted_values), 
-										24)
-				curve_headers.append(curve_header)
+				add_curve(AnmCurveFormat.SHORT4, list(data_paths).index(data_path), 24, len(converted_values), converted_values, curve_headers, curves)
 
 		if data_path == 'rotation_quaternion':
 				values = list(
@@ -247,29 +391,11 @@ def make_entry_camera() -> Entry:
 				converted_values = convert_to_anm_values('rotation_quaternion_camera', values, loc, rot, sca)
 
 				if keyframe_count > 1:
-					curve = Curve(AnmCurveFormat.SHORT4, converted_values)
-					curves.append(curve)
-
-					curve_header = CurveHeader(
-									list(data_paths).index(data_path), 
-									AnmCurveFormat.SHORT4.value, 
-									len(converted_values), 
-									36)
-					curve_headers.append(curve_header)
+					add_curve(AnmCurveFormat.SHORT4, list(data_paths).index(data_path), 36, len(converted_values), converted_values, curve_headers, curves)
 				else:
 					euler_values = list(map(lambda x: x.to_euler(), values))
 					converted_values = convert_to_anm_values('rotation_quaternion_euler', euler_values, loc, rot, sca)
-
-					curve = Curve(AnmCurveFormat.FLOAT3ALT, converted_values)
-					curves.append(curve)
-
-					curve_header = CurveHeader(
-									list(data_paths).index(data_path), 
-									AnmCurveFormat.FLOAT3ALT.value, 
-									len(converted_values), 
-									24)
-					curve_headers.append(curve_header)
-	
+					add_curve(AnmCurveFormat.FLOAT3ALT, list(data_paths).index(data_path), 24, len(converted_values), converted_values, curve_headers, curves)
 
 	# Add FOV
 	keyframe_vec3 = dict()
@@ -283,22 +409,14 @@ def make_entry_camera() -> Entry:
 			keyframe_vec3[frame * 100] = value
 
 		keyframe_vec3.update({-1: [*keyframe_vec3.values()][-1]}) # Add null key
-
-		curve = Curve(AnmCurveFormat.INT1_FLOAT1, keyframe_vec3)
-		curves.append(curve)
-		curve_header = CurveHeader(
-								2, 
-								AnmCurveFormat.INT1_FLOAT1.value, 
-								keyframe_count + 1,  # Add 1 more to frame count for null key
-								12)
-		curve_headers.append(curve_header)
+		add_curve(AnmCurveFormat.INT1_FLOAT1, 2, 12, keyframe_count + 1, keyframe_vec3, curve_headers, curves)
 
 	clump_index = -1
 	coord_index = 0
-	entry_format = 2 # Camera
+	entry_format = EntryFormat.CAMERA
 	curve_count = len(curve_headers)
 
-	entry = Entry(clump_index, coord_index, entry_format, curve_count, curve_headers, curves)
+	entry = Entry(clump_index, coord_index, entry_format.value, curve_count, curve_headers, curves)
 
 	return entry
 
@@ -346,31 +464,17 @@ def make_entry_bone(armature_obj: Armature, bone_name: str, clump_index: int) ->
 						channel_values[2]))
 
 				converted_values = convert_to_anm_values(data_path, values, loc, rot, sca)
+				print(converted_values)
 				
 				if keyframe_count > 1:
 					for frame, value in enumerate(converted_values):
 						keyframe_vec3[frame * 100] = value
 			
 					keyframe_vec3.update({-1: [*keyframe_vec3.values()][-1]}) # Add null key
+					add_curve(AnmCurveFormat.INT1_FLOAT3, list(data_paths).index(data_path), 12, keyframe_count + 1, keyframe_vec3, curve_headers, curves)
 
-					curve = Curve(AnmCurveFormat.INT1_FLOAT3, keyframe_vec3)
-					curves.append(curve)
-
-					curve_header = CurveHeader(list(data_paths).index(data_path), 
-											AnmCurveFormat.INT1_FLOAT3.value, 
-											keyframe_count + 1,  # Add 1 more to frame count for null key
-											12)
-					curve_headers.append(curve_header)
 				else:
-					curve = Curve(AnmCurveFormat.FLOAT3, converted_values)
-					curves.append(curve)
-
-					curve_header = CurveHeader(list(data_paths).index(data_path), 
-									AnmCurveFormat.FLOAT3.value, 
-									len(converted_values), 
-									12)
-					curve_headers.append(curve_header)
-
+					add_curve(AnmCurveFormat.FLOAT3, list(data_paths).index(data_path), 12, len(converted_values), converted_values, curve_headers, curves)
 					
 		if data_path == 'rotation_euler':
 			if keyframe_count < 2:
@@ -381,26 +485,12 @@ def make_entry_bone(armature_obj: Armature, bone_name: str, clump_index: int) ->
 					channel_values[5]))
 
 				converted_values = convert_to_anm_values(data_path, values, loc, rot, sca)
-				curve = Curve(AnmCurveFormat.FLOAT3ALT, converted_values)
-				curves.append(curve)
+				add_curve(AnmCurveFormat.FLOAT3ALT, list(data_paths).index(data_path), 12, len(converted_values), converted_values, curve_headers, curves)
 
-				curve_header = CurveHeader(list(data_paths).index(data_path), 
-										AnmCurveFormat.FLOAT3ALT.value, 
-										len(converted_values), 
-										24)
-				curve_headers.append(curve_header)
 			else:
 				quaternion_values = list(map(lambda x: x.to_quaternion(), values))
 				converted_values = convert_to_anm_values('rotation_quaternion', quaternion_values, loc, rot, sca)
-				
-				curve = Curve(AnmCurveFormat.SHORT4, converted_values)
-				curves.append(curve)
-
-				curve_header = CurveHeader(list(data_paths).index(data_path), 
-										AnmCurveFormat.SHORT4.value, 
-										len(converted_values), 
-										24)
-				curve_headers.append(curve_header)
+				add_curve(AnmCurveFormat.SHORT4, list(data_paths).index(data_path), 12, keyframe_count + 1, converted_values, curve_headers, curves)
 
 		if data_path == 'rotation_quaternion':
 				values = list(
@@ -413,28 +503,11 @@ def make_entry_bone(armature_obj: Armature, bone_name: str, clump_index: int) ->
 				converted_values = convert_to_anm_values(data_path, values, loc, rot, sca)
 
 				if keyframe_count > 1:
-					curve = Curve(AnmCurveFormat.SHORT4, converted_values)
-					curves.append(curve)
-
-					curve_header = CurveHeader(
-									list(data_paths).index(data_path), 
-									AnmCurveFormat.SHORT4.value, 
-									len(converted_values), 
-									36)
-					curve_headers.append(curve_header)
+					add_curve(AnmCurveFormat.SHORT4, list(data_paths).index(data_path), 36, len(converted_values), converted_values, curve_headers, curves)
 				else:
 					euler_values = list(map(lambda x: x.to_euler(), values))
 					converted_values = convert_to_anm_values('rotation_quaternion_euler', euler_values, loc, rot, sca)
-
-					curve = Curve(AnmCurveFormat.FLOAT3ALT, converted_values)
-					curves.append(curve)
-
-					curve_header = CurveHeader(
-									list(data_paths).index(data_path), 
-									AnmCurveFormat.FLOAT3ALT.value, 
-									len(converted_values), 
-									24)
-					curve_headers.append(curve_header)
+					add_curve(AnmCurveFormat.FLOAT3ALT, list(data_paths).index(data_path), 24, len(converted_values), converted_values, curve_headers, curves)
 
 		if data_path == 'scale':
 			values = list(
@@ -446,24 +519,10 @@ def make_entry_bone(armature_obj: Armature, bone_name: str, clump_index: int) ->
 			converted_values = convert_to_anm_values(data_path, values, loc, rot, sca)
 
 			if keyframe_count < 2:
-				curve = Curve(AnmCurveFormat.FLOAT3, converted_values)
-				curves.append(curve)
-				curve_header = CurveHeader(
-									list(data_paths).index(data_path), 
-									AnmCurveFormat.FLOAT3.value, 
-									len(converted_values), 
-									48)
-				curve_headers.append(curve_header)
-			else:
-				curve = Curve(AnmCurveFormat.SHORT3, converted_values)
-				curves.append(curve)
+				add_curve(AnmCurveFormat.FLOAT3, list(data_paths).index(data_path), 48, len(converted_values), converted_values, curve_headers, curves)
 
-				curve_header = CurveHeader(
-									list(data_paths).index(data_path), 
-									AnmCurveFormat.SHORT3.value, 
-									len(converted_values), 
-									48)
-				curve_headers.append(curve_header)
+			else:
+				add_curve(AnmCurveFormat.SHORT3, list(data_paths).index(data_path), 48, len(converted_values), converted_values, curve_headers, curves)
 
 				if len(converted_values) % 2 != 0:
 					values = list()
@@ -472,19 +531,14 @@ def make_entry_bone(armature_obj: Armature, bone_name: str, clump_index: int) ->
 					curve = Curve(AnmCurveFormat.SHORT3, values)
 					curves.append(curve)
 	
-	# Add toggled
-	values = list()
-	values.append(1)
-	curve = Curve(AnmCurveFormat.FLOAT1, values)
-	curves.append(curve)
-	curve_header = CurveHeader(3, AnmCurveFormat.FLOAT1.value, 1, 12)
-	curve_headers.append(curve_header)
+	# Add toggled visibility curve
+	add_curve(AnmCurveFormat.FLOAT1, 3, 12, 1, [1], curve_headers, curves)
 
 	coord_index = bone_material_indices.index(extra_mapping_reference_types.index(group.name + 'nuccChunkCoord'))
-	entry_format = 1 # Bone
+	entry_format = EntryFormat.BONE
 	curve_count = len(curve_headers)
 
-	entry = Entry(clump_index, coord_index, entry_format, curve_count, curve_headers, curves)
+	entry = Entry(clump_index, coord_index, entry_format.value, curve_count, curve_headers, curves)
 
 	return entry
 
@@ -495,6 +549,7 @@ def make_entries() -> list[Entry]:
 	"""
 	entries: List[Entry] = list()
 
+	# Loop over the armature objects and create entries for each bone
 	for armature_obj in animated_armatures:
 		anm_bones: List[Bone] = armature_obj.anm_bones
 		
@@ -502,9 +557,18 @@ def make_entries() -> list[Entry]:
 			e = make_entry_bone(armature_obj.armature, bone.name, animated_armatures.index(armature_obj))
 			entries.append(e)
 
+	# If there is a camera in the scene, create an entry for it
 	if camera_exists():
 		entries.append(make_entry_camera())
 
+	# If there are light objects in the scene, create entries for each of them
+	if light_exists():
+		lights = get_lights()
+
+		for light in lights:
+			if light['type'] in ["SUN", "POINT", "AREA"]:
+				entries.append(make_entry_light(lights.index(light)))
+	
 	return entries
 
 
@@ -533,21 +597,33 @@ def make_anm() -> bytearray:
 	
 	entry_count = len(entries)
 	clump_count = len(clumps)
+	coord_count = len(coord_parent.anm_coords) // 2
+
 	other_entry_count = 0
-	loop = 0
 
 	if camera_exists():
 		other_entry_count += 1
-		
 
-	coord_count = len(coord_parent.anm_coords) // 2
+	if light_exists():
+		lights = get_lights()
+
+		for light in lights:
+			if light['type'] == "SUN":
+				other_entry_count += 1
+			if light['type'] == "POINT":
+				other_entry_count += 1
+			if light['type'] == "AREA":
+				other_entry_count += 1
+	
+	# TODO: Get the frame length from the Action itself
+	# action = obj.animation_data.action
+	# start_frame, end_frame = action.frame_range
+	# frame_length = end_frame - start_frame + 1
 
 	frame_length = bpy.context.scene.frame_end
 
-	if is_looped:
-		loop = 1
 
-	anm = Anm(frame_length, 1, entry_count, loop, 
+	anm = Anm(frame_length, 1, entry_count, 1, 
 					clump_count, other_entry_count, coord_count,
 					clumps, coord_parent, entries)
 
@@ -561,26 +637,99 @@ def make_camera() -> bytearray:
 	"""
 	Make camera buffer and return it.
 	"""
-	unk = 0
+	unk1 = 0
 	fov = 45.0
 
-	cam = Camera(unk, fov)
+	cam = Camera(unk1, fov)
 
 	with BinaryReader(endianness=Endian.BIG) as cam_writer:
 		cam_writer.write_struct(cam)
 
 		return cam_writer.buffer()
 
-# TODO: Add support for LightDir chunks
+def make_lightdirc() -> bytearray:
+	"""
+	Make lightDirc buffer and return it.
+	"""
+	unk1 = 0
+	unk2 = 0
+	unk3 = 0
+	unk4 = 0
+
+	unk5 = 0.521569
+	unk6 = 0.827451
+	unk7 = 1
+	unk8 = 1
+
+	unk9 = 0
+	unk10 = 0
+	unk11 = 0
+	unk12 = 0
 	
+	unk13 = -0.185349
+	unk14 = 0.438735
+	unk15 = -0.181711
+	unk16 = 0.860313
+
+	lightdirc = LightDirc(unk1, unk2, unk3, unk4, unk5, unk6, unk7, unk8, unk9, unk10, unk11,unk12, unk13, unk14, unk15, unk16)
+
+	with BinaryReader(endianness=Endian.BIG) as lightdirc_writer:
+		lightdirc_writer.write_struct(lightdirc)
+
+		return lightdirc_writer.buffer()
+
+def make_lightpoint() -> bytearray:
+	"""
+	Make lightPoint buffer and return it.
+	"""
+	unk1 = 0
+	unk2 = 0
+	unk3 = 0
+	unk4 = 0
+
+	unk5 = 0.0392157
+	unk6 = 0.117647
+	unk7 = 1
+	unk8 = 0
+
+	unk9 = 0
+	unk10 = -23.2275
+	unk11 = -183.9
+	unk12 = 111.04
+
+	unk13 = 100
+	unk14 = 400
+	unk15 = 0
+	unk16 = 0
+
+	lightpoint = LightPoint(unk1, unk2, unk3, unk4, unk5, unk6, unk7, unk8, unk9, unk10, unk11, unk12, unk13, unk14, unk15, unk16)
+
+	with BinaryReader(endianness=Endian.BIG) as lightpoint_writer:
+		lightpoint_writer.write_struct(lightpoint)
+
+		return lightpoint_writer.buffer()
+
+def make_ambient() -> bytearray:
+	"""
+	Make Ambient buffer and return it.
+	"""
+	unk1 = 0.290196
+	unk2 = 0.494118
+	unk3 = 0.611765
+	unk4 = 1
+
+
+	ambient = Ambient(unk1, unk2, unk3, unk4)
+
+	with BinaryReader(endianness=Endian.BIG) as ambient_writer:
+		ambient_writer.write_struct(ambient)
+
+		return ambient_writer.buffer()
 
 def write_buffers():
 	""" Write buffers to file. """
-	export_path = f'{directory}\\exported_anm'
+	export_path = f'{directory}\\Exported Animations'
 
-	if not os.path.exists(export_path):
-		os.makedirs(export_path)
-	
 	action_name = animated_armatures[0].action.name
 	
 	anm_path = f'{export_path}\\[000] {action_name} (nuccChunkAnm)'
@@ -588,14 +737,33 @@ def write_buffers():
 
 	if not os.path.exists(anm_path):
 		os.makedirs(anm_path)
-		
+	
+	# Write the ANM file
 	with open(f'{anm_path}\\{anm_filename}', 'wb+') as anm:
 		anm.write(make_anm())
 	
+	# Write the CAM file, if a camera exists
 	if camera_exists():
-		cam_filename = "camera01.camera"
+		cam_filename = 'camera01'
 		with open(f'{anm_path}\\{cam_filename}', 'wb+') as cam:
 			cam.write(make_camera())
+
+	# Write the LIGHT files
+	if light_exists():
+		light_types = {
+			"SUN": (".lightdirc", make_lightdirc),
+			"POINT": (".lightpoint", make_lightpoint),
+			"AREA": (".ambient", make_ambient),
+		}
+
+		for i, light in enumerate(get_lights()):
+			name = light['name'] + str(i + 1).zfill(2)
+			light_type = light['type']
+			light_filename = name + light_types[light_type][0]
+
+			with open(f'{anm_path}\\{light_filename}', 'wb+') as light:
+				light.write(light_types[light_type][1]())
+		
 
 def write_json():
 	""" Write page json to file. """
@@ -603,10 +771,10 @@ def write_json():
 	chunk_references: List[Dict] = list()
 	chunks: List[Dict] = list()
 
-
+	# Create camera chunks
 	if camera_exists():
 		cam_path = animated_armatures[0].chunk_path
-		cam_name = "camera01"
+		cam_name = 'camera01'
 
 		cam_chunk: Dict = make_chunk_dict(cam_path, cam_name, "nuccChunkCamera", reference=False, file=False)
 		chunk_maps.append(cam_chunk)
@@ -614,6 +782,40 @@ def write_json():
 		cam_file_chunk: Dict = make_chunk_dict(cam_path, cam_name, "nuccChunkCamera", reference=False, file=True)
 		chunks.append(cam_file_chunk)
 
+	# Create light chunks
+	if light_exists():
+		for i, light in enumerate(get_lights()):
+			if light['type'] == "POINT":
+				lightpoint_path = animated_armatures[0].chunk_path
+				lightpoint_name = light['name'] + str(i + 1).zfill(2)
+
+				lightpoint_chunk: Dict = make_chunk_dict(lightpoint_path, lightpoint_name, "nuccChunkLightPoint", reference=False, file=False)
+				chunk_maps.append(lightpoint_chunk)
+
+				lightpoint_file_chunk: Dict = make_chunk_dict(lightpoint_path, lightpoint_name, "nuccChunkLightPoint", reference=False, file=True)
+				chunks.append(lightpoint_file_chunk)
+			
+			if light['type'] == "SUN":
+				lightdirc_path = animated_armatures[0].chunk_path
+				lightdirc_name = light['name'] + str(i + 1).zfill(2)
+
+				lightdirc_chunk: Dict = make_chunk_dict(lightdirc_path, lightdirc_name, "nuccChunkLightDirc", reference=False, file=False)
+				chunk_maps.append(lightdirc_chunk)
+
+				lightdirc_file_chunk: Dict = make_chunk_dict(lightdirc_path, lightdirc_name, "nuccChunkLightDirc", reference=False, file=True)
+				chunks.append(lightdirc_file_chunk)
+
+			if light['type'] == "AREA":
+				ambient_path = animated_armatures[0].chunk_path
+				ambient_name = light['name'] + str(i + 1).zfill(2)
+
+				ambient_chunk: Dict = make_chunk_dict(ambient_path, ambient_name, "nuccChunkAmbient", reference=False, file=False)
+				chunk_maps.append(ambient_chunk)
+
+				ambient_file_chunk: Dict = make_chunk_dict(ambient_path, ambient_name, "nuccChunkAmbient", reference=False, file=True)
+				chunks.append(ambient_file_chunk)
+
+	# Create ANM chunk
 	if animated_armatures:
 		anm_path = animated_armatures[0].chunk_path
 		anm_name = animated_armatures[0].action.name
@@ -660,7 +862,7 @@ def write_json():
 	page_json['Chunk References'] = list(map(lambda x: x, chunk_references))
 	page_json['Chunks'] = list(map(lambda x: x, chunks))
 
-	export_path = f'{directory}\\exported_anm'
+	export_path = f'{directory}\\Exported Animations'
 	page_path = export_path + '\\[000] ' + animated_armatures[0].action.name +' (nuccChunkAnm)'
 
 	if not os.path.exists(page_path):
