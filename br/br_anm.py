@@ -23,6 +23,13 @@ anm_writer = BinaryReader(endianness=Endian.BIG, encoding='utf-8')  # Create a n
 	# Proper name not yet decided
 	CAMERA = 10"""
 
+class EntryFormat(IntEnum):
+    BONE = 1
+    CAMERA = 2
+    MATERIAL = 4
+    LIGHTDIRC = 5
+    LIGHTPOINT = 6
+
 class AnmCurveFormat(IntEnum):
     FLOAT3 = 5  # location/scale
     INT1_FLOAT3 = 6  # location/scale (with keyframe)
