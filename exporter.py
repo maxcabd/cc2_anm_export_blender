@@ -23,7 +23,7 @@ from common.coordinate_converter import *
 from common.helpers import *
 
 
-is_looped = False # Set to true if your animation should be looped
+is_looped = False # Set to True if your animation should be looped
 lightpoint_index = -1
 
 def camera_exists() -> bool:
