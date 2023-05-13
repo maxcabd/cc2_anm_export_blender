@@ -3,8 +3,6 @@ from mathutils import Matrix, Quaternion, Euler, Vector
 
 from typing import Tuple, List, Dict
 
-from common.bone_props import AnmBoneProperties
-
 # https://github.com/SutandoTsukai181/cc2_xfbin_blender/blob/main/blender/common/coordinate_converter.py
 
 def rot_to_blender(rot: Tuple[float, float, float]):
