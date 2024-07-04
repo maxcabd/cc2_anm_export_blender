@@ -6,9 +6,9 @@ from bpy.types import Armature
 from mathutils import Matrix
 
 from common.armature_props import AnmArmature
-from common.bone_props import get_edit_matrix, get_matrix_world
-from xfbin.xfbinlib import CurveFormat
-from xfbin.xfbinlib import math
+from common.bone_props import get_edit_matrix
+from xfbin.xfbin_lib import NuccAnmKeyFormat, NuccAnmKey, TrackHeader
+
 
 
 
@@ -40,7 +40,8 @@ def rot_from_blender(rot: Euler) -> Tuple[float, float, float]:
 
 
 
-def convert_bone_value(anm_armature: AnmArmature, bone_name: str, data_path: str, curve_format: CurveFormat, values: List[Any], frame: int = 0) -> Tuple[Any]:
+def convert_bone_value(anm_armature: AnmArmature, bone_name: str, data_path: str,
+					   track_header: TrackHeader, values: List[Any], frame: int = 0) -> NuccAnmKey:
 	armature: Armature = anm_armature.armature
 
 	has_parent: bool = any(bone_name for bone in anm_armature.armature.data.bones if bone.parent)
@@ -55,13 +56,7 @@ def convert_bone_value(anm_armature: AnmArmature, bone_name: str, data_path: str
 			translation.rotate(rot)
 
 			return tuple(pos_m_to_cm_tuple((translation + loc)[:]))
-		else:
-			world_matrix: Matrix = get_matrix_world(armature, edit_matrix, bone_name)
-			translation = Vector(seq) + world_matrix.to_translation().copy() # Add the armature's matrix world location to the translation
-			print(world_matrix.to_translation().copy()[:])
-			return tuple(pos_m_to_cm_tuple((translation)[:]))
-			
-			
+					
 	def rotate_quaternion(seq: List[float]) -> Tuple[int, int, int, int]:
 		if has_parent:
 			_, rot, _ = edit_matrix.decompose()
@@ -70,28 +65,20 @@ def convert_bone_value(anm_armature: AnmArmature, bone_name: str, data_path: str
 			# Swizzle the quaternion to match the game's format to x, y, z, w
 			rotation = Quaternion((rotation.x, rotation.y, rotation.z, rotation.w))
 			return tuple(rotation)
-		else:
-			world_matrix: Matrix = get_matrix_world(armature, edit_matrix, bone_name)
-			rotation = world_matrix.to_quaternion().copy() @ Quaternion(seq)
-			rotation = Quaternion((-rotation.x, -rotation.y, -rotation.z, rotation.w))
-			return tuple([int(seq * QUAT_COMPRESS) for seq in rotation[:]])
-			
-			
-
-
-	match data_path, curve_format:
-		case 'location', CurveFormat.Vector3Linear:
-			return math.Vec3Linear(frame * 100, translate(values))
-		case 'location', CurveFormat.Vector3Fixed:
-			return math.Vec3(translate(values))
-		case 'rotation_quaternion', CurveFormat.QuaternionLinear:
-			return math.Vec4Linear(frame * 100, rotate_quaternion(values))
-		case 'scale', CurveFormat.Vector3Linear:
+	
+	match data_path, track_header.key_format:
+		case 'location', NuccAnmKeyFormat.Vector3Linear:
+			return NuccAnmKey.Vec3Linear(frame * 100, translate(values))
+		case 'location', NuccAnmKeyFormat.Vector3Fixed:
+			return NuccAnmKey.Vec3(translate(values))
+		case 'rotation_quaternion', NuccAnmKeyFormat.QuaternionLinear:
+			return NuccAnmKey.Vec4Linear(frame * 100, rotate_quaternion(values))
+		case 'scale', NuccAnmKeyFormat.Vector3Linear:
 			scale = Vector([abs(seq) for seq in values])[:]
-			return math.Vec3Linear(frame * 100, tuple(scale[:]))
-		case 'scale', CurveFormat.Vector3Fixed:
+			return NuccAnmKey.Vec3Linear(frame * 100, tuple(scale[:]))
+		case 'scale', NuccAnmKeyFormat.Vector3Fixed:
 			scale = Vector([abs(seq) for seq in values])[:]
-			return math.Vec3(tuple(scale))
+			return NuccAnmKey.Vec3(tuple(scale))
 		
 
 

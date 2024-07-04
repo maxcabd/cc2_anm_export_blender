@@ -1,4 +1,4 @@
-from xfbin.xfbinlib import NuccStructInfo, NuccStructReference
+from xfbin.xfbin_lib import NuccStructInfo, NuccStructReference
 from bpy.types import Armature, Bone, Action
 from typing import List
 

@@ -3,14 +3,12 @@ import sys
 import bpy
 from collections import defaultdict
 from typing import Dict, List, Union
-from bpy.types import Armature, Bone, FCurve	
+from bpy.types import Armature, Bone, ActionGroup
 
 directory, filename = os.path.split(os.path.abspath(bpy.context.space_data.text.filepath))
 sys.path.append(directory)
 
-from xfbin.xfbinlib import *
-from xfbin.xfbinlib import math
-
+from xfbin.xfbin_lib import *
 
 from common.bone_props import *
 from common.armature_props import *
@@ -74,7 +72,10 @@ def make_anm(anm_prop: AnmProp) -> NuccAnm:
 
 	anm.clumps.extend(make_anm_clump(anm_prop.armatures, struct_references))
 	anm.coord_parents.extend(make_anm_coords(anm_prop.armatures))
-	anm.entries.extend(make_coord_entries(anm_prop.armatures, struct_references, anm.clumps))
+
+	for anm_armature in anm_prop.armatures:
+		anm.entries.extend(make_coord_entries(anm_armature, struct_references, anm.clumps))
+	
 		
 	return anm
 		
@@ -143,239 +144,203 @@ def make_anm_coords(anm_armatures: List[AnmArmature]) -> List[CoordParent]:
 
 
 
-def make_coord_entries(anm_armatures: List[AnmArmature], struct_references: List[NuccStructReference], clumps: List[AnmClump]) -> List[AnmEntry]:
-	entries: List[AnmEntry] = []
+def make_coord_entries(anm_armature: AnmArmature, struct_references: List[NuccStructReference], clumps: List[AnmClump]) -> List[AnmEntry]:
+	entries: List[AnmEntry] = list()
 
-	for anm_armature in anm_armatures:
-		# Filter the groups that aren't in anm_armature.anm_bones
-		groups = [group for group in anm_armature.action.groups.values() if group.name in [bone.name for bone in anm_armature.anm_bones]]
+	
+	# Filter the groups that aren't in anm_armature.anm_bones
+	groups: List[ActionGroup] = [group for group in anm_armature.action.groups.values() if group.name in [bone.name for bone in anm_armature.anm_bones]]
 
-		for i, group in enumerate(groups):
-			clump_reference_index = struct_references.index(anm_armature.nucc_struct_references[0])
-			clump_index = next((clump_index for clump_index, clump in enumerate(clumps) if clump.clump_index == clump_reference_index), None)
+	for group in groups:
+		clump_reference_index = struct_references.index(anm_armature.nucc_struct_references[0])
+		clump_index = next((clump_index for clump_index, clump in enumerate(clumps) if clump.clump_index == clump_reference_index), None)
 
-			coord_reference_index = struct_references.index(NuccStructReference(group.name, NuccStructInfo(group.name, "nuccChunkCoord", anm_armature.chunk_path)))
-			coord_index = next((coord_index for coord_index, coord in enumerate(clumps[clump_index].bone_material_indices) if coord == coord_reference_index), None)
+		coord_reference_index = struct_references.index(NuccStructReference(group.name, NuccStructInfo(group.name, "nuccChunkCoord", anm_armature.chunk_path)))
+		coord_index = next((coord_index for coord_index, coord in enumerate(clumps[clump_index].bone_material_indices) if coord == coord_reference_index), None)
+		
+		entry = AnmEntry()
+		entry.coord = AnmCoord(clump_index, coord_index)
+		entry.entry_format = EntryFormat.Coord
+
+		
+		location_curves: List[FCurve] = [None] * 3
+		rotation_curves: List[FCurve] = [None] * 3 # Euler rotations
+		quaternion_curves: List[FCurve] = [None] * 4
+		scale_curves: List[FCurve] = [None] * 3
+		toggle_curves: List[FCurve] = [None] * 1
+
+		channel_dict = {
+			'location': location_curves,
+			'rotation_euler': rotation_curves,
+			'rotation_quaternion': quaternion_curves,
+			'scale': scale_curves,
+			'toggled': toggle_curves,
+		}
+
+		channels = group.channels
+
+		for fcurve in channels:
+			data_path = fcurve.data_path[fcurve.data_path.rindex('.') + 1:] if '.' in fcurve.data_path else ''
+
+			if curves := channel_dict.get(data_path):
+				curves[fcurve.array_index] = fcurve
+			else:
+				print(f'Warning: Ignoring curve with unsupported data path {fcurve.data_path} and index {fcurve.array_index}')
+
+		# ------------------- location -------------------
+		location_track_header = TrackHeader()
+		location_track = Track()
+
+		location_keyframes: Dict[int, List[float]] = defaultdict(list)
+
+		for i in range(3):
+			if not location_curves[i]:
+				continue
+
+			axis_co = [0] * 2 * len(location_curves[i].keyframe_points)
+			location_curves[i].keyframe_points.foreach_get('co', axis_co)
+
+			axis_iter = iter(axis_co)
+
+			for frame, value in zip(axis_iter, axis_iter):
+				location_keyframes[int(frame)].append(value)
+				
+
+		for frame, value in location_keyframes.items():
+			if len(location_keyframes.items()) > 1:
+				location_track_header.track_index = 0
+				location_track_header.key_format = NuccAnmKeyFormat.Vector3Linear
+				location_track_header.frame_count = len(location_keyframes.items()) + 1 # Increment for null track value
+
+				converted_value = convert_bone_value(anm_armature, group.name, 'location', location_track_header, value, frame)
+				location_track.keys.append(converted_value)
+
+			else:
+				location_track_header.track_index = 0
+				location_track_header.key_format = NuccAnmKeyFormat.Vector3Fixed
+				location_track_header.frame_count = 1
+
+				converted_value = convert_bone_value(anm_armature, group.name, 'location', location_track_header, value, frame)
+				location_track.keys.append(converted_value)
+
+		if len(location_keyframes.items()) > 1:
+			null_key: NuccAnmKey = NuccAnmKey.Vec3Linear(-1, location_track.keys[-1].values)
+			location_track.keys.append(null_key)
+
+		entry.tracks.append(location_track)
+		entry.track_headers.append(location_track_header)
+	
+
+		# ------------------- rotation quaternion -------------------
+		rotation_track_header = TrackHeader()
+		rotation_track = Track()
+
+		rotation_keyframes: Dict[int, List[float]] = defaultdict(list)
+
+		if any(quaternion_curves):
+			for i in range(4):
+				axis_co = [0] * 2 * len(quaternion_curves[i].keyframe_points)
+				quaternion_curves[i].keyframe_points.foreach_get('co', axis_co)
+
+				axis_iter = iter(axis_co)
+
+				for frame, value in zip(axis_iter, axis_iter):
+					rotation_keyframes[int(frame)].append(value)
+
+			for frame, value in rotation_keyframes.items():
+					rotation_track_header.track_index = 1
+					rotation_track_header.key_format = NuccAnmKeyFormat.QuaternionLinear
+					rotation_track_header.frame_count = len(rotation_keyframes.items()) + 1
+
+					converted_value = convert_bone_value(anm_armature, group.name, 'rotation_quaternion', rotation_track_header, value, frame)
+					rotation_track.keys.append(converted_value)
+
 			
-			entry = AnmEntry()
-			entry.coord = AnmCoord(clump_index, coord_index)
-			entry.entry_format = EntryFormat.Coord
-
-			# Get the edit bone matrix for the bone
-			edit_matrix = get_edit_matrix(anm_armature.armature, group.name)
+			null_key: NuccAnmKey = NuccAnmKey.Vec4Linear(-1, rotation_track.keys[-1].values)
+			rotation_track.keys.append(null_key)
 			
+			entry.tracks.append(rotation_track)
+			entry.track_headers.append(rotation_track_header)
 
+		# ------------------- scale -------------------
+		scale_track_header = TrackHeader()
+		scale_track = Track()
 
-			location_curves: List[FCurve] = [None] * 3
-			rotation_curves: List[FCurve] = [None] * 3 # Euler rotations
-			quaternion_curves: List[FCurve] = [None] * 4
-			scale_curves: List[FCurve] = [None] * 3
-			toggle_curves: List[FCurve] = [None] * 1
+		scale_keyframes: Dict[int, List[float]] = defaultdict(list)
 
-			channel_dict = {
-				'location': location_curves,
-				'rotation_euler': rotation_curves,
-				'rotation_quaternion': quaternion_curves,
-				'scale': scale_curves,
-				'toggled': toggle_curves,
-			}
+		for i in range(3):
+			if not scale_curves[i]:
+				continue
 
-			channels = group.channels
+			axis_co = [0] * 2 * len(scale_curves[i].keyframe_points)
+			scale_curves[i].keyframe_points.foreach_get('co', axis_co)
 
-			for fcurve in channels:
-				data_path = fcurve.data_path[fcurve.data_path.rindex('.') + 1:] if '.' in fcurve.data_path else ''
+			axis_iter = iter(axis_co)
 
-				if curves := channel_dict.get(data_path):
-					curves[fcurve.array_index] = fcurve
-				else:
-					print(f'Warning: Ignoring curve with unsupported data path {fcurve.data_path} and index {fcurve.array_index}')
+			for frame, value in zip(axis_iter, axis_iter):
+				scale_keyframes[int(frame)].append(value)
 
-			# ------------------- location -------------------
-			location_curve_header = CurveHeader()
-			location_anm_curves: List[Curve] = list()
+			
+		for frame, value in scale_keyframes.items():
+			if len(scale_keyframes.items()) > 1:
+				scale_track_header.track_index = 2
+				scale_track_header.key_format = NuccAnmKeyFormat.Vector3Linear
+				scale_track_header.frame_count = len(scale_keyframes.items()) + 1
 
-			location_keyframes: Dict[int, List[float]] = defaultdict(list)
+				converted_value = convert_bone_value(anm_armature, group.name, 'scale', scale_track_header, value, frame)
+				scale_track.keys.append(converted_value)
+			else:
+				scale_track_header.track_index = 2
+				scale_track_header.key_format = NuccAnmKeyFormat.Vector3Fixed
+				scale_track_header.frame_count = 1
 
-			for i in range(3):
-				if not location_curves[i]:
+				converted_value = convert_bone_value(anm_armature, group.name, 'scale', scale_track_header, value, frame)
+				scale_track.keys.append(converted_value)
+		
+		if len(scale_keyframes.items()) > 1:
+			null_key: NuccAnmKey = NuccAnmKey.Vec3Linear(-1, scale_track.keys[-1].values)
+			scale_track.keys.append(null_key)
+		
+
+		entry.tracks.append(scale_track)
+		entry.track_headers.append(scale_track_header)
+	
+
+		# ------------------- toggled -------------------
+		toggle_track_header = TrackHeader()
+		toggle_track = Track()
+
+		toggle_keyframes: Dict[int, List[float]] = defaultdict(list)
+
+		if any(toggle_curves):
+			for i in range(1):
+				if not toggle_curves[i]:
 					continue
 
 				#Get keyframes
-				axis_co = [0] * 2 * len(location_curves[i].keyframe_points)
-				location_curves[i].keyframe_points.foreach_get('co', axis_co)
+				axis_co = [0] * 2 * len(toggle_curves[i].keyframe_points)
+				toggle_curves[i].keyframe_points.foreach_get('co', axis_co)
 
 				axis_iter = iter(axis_co)
 
 				for frame, value in zip(axis_iter, axis_iter):
-					location_keyframes[int(frame)].append(value)
-					
-			for frame, value in location_keyframes.items():
-					if len(location_keyframes.items()) > 1:
-
-						converted_value = convert_bone_value(anm_armature, group.name, 'location', CurveFormat.Vector3Linear, value, frame)
-						location_curve = Curve(CurveFormat.Vector3Linear, converted_value)
-						location_anm_curves.append(location_curve)
-
-						location_curve_header.curve_index = 0
-						location_curve_header.curve_format = CurveFormat.Vector3Linear
-						location_curve_header.frame_count = len(location_keyframes.items())
-						location_curve_header.curve_size = 12
-					else:
-						converted_value = convert_bone_value(anm_armature, group.name, 'location', CurveFormat.Vector3Fixed, value)
-						location_curve = Curve(CurveFormat.Vector3Fixed, converted_value)
-						location_anm_curves.append(location_curve)
-
-						location_curve_header.curve_index = 0
-						location_curve_header.curve_format = location_curve.curve_format
-						location_curve_header.frame_count = 1
-
-			if len(location_anm_curves) > 1:
-				null_keyframe = math.Vec3Linear(-1, location_anm_curves[-1].keyframe.channels)
-				null_curve = Curve(CurveFormat.Vector3Linear, null_keyframe)
-				location_anm_curves.append(null_curve)
-				location_curve_header.frame_count += 1
-
-			entry.curve_headers.append(location_curve_header)
-			entry.curves.extend(location_anm_curves)
-
-			# ------------------- rotation quaternion -------------------
-			quaternion_curve_header = CurveHeader()
-			quaternion_anm_curves: List[Curve] = list()
-
-			quaternion_keyframes = defaultdict(list)
-
-			if any(quaternion_curves):
-				for i in range(4):
-					axis_co = [0] * 2 * len(quaternion_curves[i].keyframe_points)
-					quaternion_curves[i].keyframe_points.foreach_get('co', axis_co)
-
-					axis_iter = iter(axis_co)
-
-					for frame, value in zip(axis_iter, axis_iter):
-						quaternion_keyframes[int(frame)].append(value)
-					
-				# Construct output format for each frame
-				for frame, value in quaternion_keyframes.items():	
-						converted_value = convert_bone_value(anm_armature, group.name, 'rotation_quaternion', CurveFormat.QuaternionLinear, value, frame)
-						quaternion_curve = Curve(CurveFormat.QuaternionLinear, converted_value)
-						quaternion_anm_curves.append(quaternion_curve)
-
-						quaternion_curve_header.curve_index = 1
-						quaternion_curve_header.curve_format = quaternion_curve.curve_format
-						quaternion_curve_header.frame_count = len(quaternion_keyframes.items())
-						quaternion_curve_header.curve_size = 12
-				
-				null_keyframe = math.Vec4Linear(-1, quaternion_anm_curves[-1].keyframe.channels)
-				null_curve = Curve(CurveFormat.QuaternionLinear, null_keyframe)
-				quaternion_anm_curves.append(null_curve)
-				quaternion_curve_header.frame_count += 1
-
-				entry.curve_headers.append(quaternion_curve_header)
-				entry.curves.extend(quaternion_anm_curves)
-
-			# ------------------- scale -------------------
-			scale_curve_header = CurveHeader()
-			scale_anm_curves: List[Curve] = list()
-
-			scale_keyframes = defaultdict(list)
-
-			for i in range(3):
-				if not scale_curves[i]:
-					continue
+					toggle_keyframes[int(frame)].append(value)
 			
-				# Get keyframes
-				axis_co = [0] * 2 * len(scale_curves[i].keyframe_points)
-				scale_curves[i].keyframe_points.foreach_get('co', axis_co)
+			for frame, value in toggle_keyframes.items():
+				toggle_track_header.track_index = 3
+				toggle_track_header.key_format = NuccAnmKeyFormat.FloatFixed
+				toggle_track_header.frame_count = len(toggle_keyframes.items())
 
-				axis_iter = iter(axis_co)
+				toggle_track.keys.append(NuccAnmKey.Float(value[0]))
 
-				for frame, value in zip(axis_iter, axis_iter):
-					scale_keyframes[int(frame)].append(value)
-					
-			for frame, value in scale_keyframes.items():
-				if len(scale_keyframes.items()) > 1:
-					converted_value = convert_bone_value(anm_armature, group.name, 'scale', CurveFormat.Vector3Linear, value, frame)
-					scale_curve = Curve(CurveFormat.Vector3Linear, converted_value)
-					scale_anm_curves.append(scale_curve)
-
-					scale_curve_header.curve_index = 2
-					scale_curve_header.curve_format = CurveFormat.Vector3Linear
-					scale_curve_header.curve_size =  12
-				else:
-					converted_value = convert_bone_value(anm_armature, group.name, 'scale', CurveFormat.Vector3Fixed, value)
-					scale_curve = Curve(CurveFormat.Vector3Fixed, converted_value)
-					entry.curves.append(scale_curve)
-
-					scale_curve_header.curve_index = 2
-					scale_curve_header.frame_count = 1
-
-
-			if len(scale_anm_curves) > 1:
-				null_keyframe = math.Vec3Linear(-1, scale_anm_curves[-1].keyframe.channels)
-				null_curve = Curve(CurveFormat.Vector3Linear, null_keyframe)
-				scale_anm_curves.append(null_curve)
-				scale_curve_header.frame_count += 1
-
-				
-			entry.curves.extend(scale_anm_curves)
-
-			scale_curve_header.frame_count = len(scale_anm_curves)
-			entry.curve_headers.append(scale_curve_header)
-
+		
+		entry.tracks.append(toggle_track)
+		entry.track_headers.append(toggle_track_header)
 			
 
-			# ------------------- toggled -------------------
-			toggle_curve_header = CurveHeader()
-			toggle_anm_curves: List[Curve] = list()
-
-			toggle_keyframes = defaultdict(list)
-
-			if any(toggle_curves):
-				for i in range(1):
-					if not toggle_curves[i]:
-						continue
-
-					# Get keyframes
-					axis_co = [0] * 2 * len(toggle_curves[i].keyframe_points)
-					toggle_curves[i].keyframe_points.foreach_get('co', axis_co)
-
-					axis_iter = iter(axis_co)
-
-					for frame, value in zip(axis_iter, axis_iter):
-						toggle_keyframes[int(frame)].append(value)
-
-				# Construct output format for each frame
-				for frame, value in toggle_keyframes.items():
-					toggle_curve = Curve(CurveFormat.FloatFixed, math.Float(value[0]))
-					toggle_anm_curves.append(toggle_curve)
-
-					toggle_curve_header.curve_index = 3
-					toggle_curve_header.curve_format = toggle_curve.curve_format
-					toggle_curve_header.frame_count = len(toggle_anm_curves)
-					toggle_curve_header.curve_size = 4
-				
-				entry.curve_headers.append(toggle_curve_header)
-				entry.curves.extend(toggle_anm_curves)
-			
-
-			entries.append(entry)
-
-	
+		entries.append(entry)
 
 	return entries
-
-
-def clean_anm_curves(anm_curves: List[Curve]) -> List[Curve]:
-	"""
-	Return list of AnmCurves
-	"""
-	cleaned_curves: List[Curve] = list()
-
-	for curve in anm_curves:
-		if len(curve.keyframe.channels) > 1:
-			cleaned_curves.append(curve)
-
-	return cleaned_curves
 
 
 	
