@@ -58,7 +58,7 @@ class AnmProp:
 	
 	
 
-def make_anm(anm_prop: AnmProp) -> NuccAnm:
+def make_anm(anm_prop: AnmProp, camera: bpy.types.Camera) -> NuccAnm:
 	"""
 	Return NuccAnm object from AnmProp object.
 	"""
@@ -66,6 +66,10 @@ def make_anm(anm_prop: AnmProp) -> NuccAnm:
 	anm.struct_info = NuccStructInfo(f"{anm_prop.armatures[0].action.name}", "nuccChunkAnm", ANM_CHUNK_PATH)
 	anm.is_looped = IS_LOOPED
 	anm.frame_count = bpy.context.scene.frame_end * 100
+
+	
+	anm.other_entries_indices = [0]
+
 
 	# Combined struct references from all armatures for this AnmProp
 	struct_references: List[NuccStructReference] = [ref for armature in anm_prop.armatures for ref in armature.nucc_struct_references]
@@ -75,6 +79,11 @@ def make_anm(anm_prop: AnmProp) -> NuccAnm:
 
 	for anm_armature in anm_prop.armatures:
 		anm.entries.extend(make_coord_entries(anm_armature, struct_references, anm.clumps))
+
+	
+	anm.entries.extend(make_camera_entries(camera))
+		
+	
 	
 		
 	return anm
@@ -152,17 +161,7 @@ def make_coord_entries(anm_armature: AnmArmature, struct_references: List[NuccSt
 	groups: List[ActionGroup] = [group for group in anm_armature.action.groups.values() if group.name in [bone.name for bone in anm_armature.anm_bones]]
 
 	for group in groups:
-		clump_reference_index = struct_references.index(anm_armature.nucc_struct_references[0])
-		clump_index = next((clump_index for clump_index, clump in enumerate(clumps) if clump.clump_index == clump_reference_index), None)
-
-		coord_reference_index = struct_references.index(NuccStructReference(group.name, NuccStructInfo(group.name, "nuccChunkCoord", anm_armature.chunk_path)))
-		coord_index = next((coord_index for coord_index, coord in enumerate(clumps[clump_index].bone_material_indices) if coord == coord_reference_index), None)
-		
-		entry = AnmEntry()
-		entry.coord = AnmCoord(clump_index, coord_index)
-		entry.entry_format = EntryFormat.Coord
-
-		
+		# ------------------- fcurves -------------------
 		location_curves: List[FCurve] = [None] * 3
 		rotation_curves: List[FCurve] = [None] * 3 # Euler rotations
 		quaternion_curves: List[FCurve] = [None] * 4
@@ -186,6 +185,19 @@ def make_coord_entries(anm_armature: AnmArmature, struct_references: List[NuccSt
 				curves[fcurve.array_index] = fcurve
 			else:
 				print(f'Warning: Ignoring curve with unsupported data path {fcurve.data_path} and index {fcurve.array_index}')
+
+		
+		# ------------------- entry -------------------
+		clump_reference_index = struct_references.index(anm_armature.nucc_struct_references[0])
+		clump_index = next((clump_index for clump_index, clump in enumerate(clumps) if clump.clump_index == clump_reference_index), None)
+
+		coord_reference_index = struct_references.index(NuccStructReference(group.name, NuccStructInfo(group.name, "nuccChunkCoord", anm_armature.chunk_path)))
+		coord_index = next((coord_index for coord_index, coord in enumerate(clumps[clump_index].bone_material_indices) if coord == coord_reference_index), None)
+		
+		entry = AnmEntry()
+		entry.coord = AnmCoord(clump_index, coord_index)
+		entry.entry_format = EntryFormat.Coord
+
 
 		# ------------------- location -------------------
 		location_track_header = TrackHeader()
@@ -262,6 +274,28 @@ def make_coord_entries(anm_armature: AnmArmature, struct_references: List[NuccSt
 			entry.tracks.append(rotation_track)
 			entry.track_headers.append(rotation_track_header)
 
+		elif any(rotation_curves):
+			for i in range(3):
+				axis_co = [0] * 2 * len(rotation_curves[i].keyframe_points)
+				rotation_curves[i].keyframe_points.foreach_get('co', axis_co)
+
+				axis_iter = iter(axis_co)
+
+				for frame, value in zip(axis_iter, axis_iter):
+					rotation_keyframes[int(frame)].append(value)
+			
+			for frame, value in rotation_keyframes.items():
+				rotation_track_header.track_index = 1
+				rotation_track_header.key_format = NuccAnmKeyFormat.EulerXYZFixed
+				rotation_track_header.frame_count = len(rotation_keyframes.items())
+
+				converted_value = convert_bone_value(anm_armature, group.name, 'rotation_euler', rotation_track_header, value, frame)
+				rotation_track.keys.append(converted_value)
+		
+			entry.tracks.append(rotation_track)
+			entry.track_headers.append(rotation_track_header)
+
+
 		# ------------------- scale -------------------
 		scale_track_header = TrackHeader()
 		scale_track = Track()
@@ -305,7 +339,6 @@ def make_coord_entries(anm_armature: AnmArmature, struct_references: List[NuccSt
 		entry.tracks.append(scale_track)
 		entry.track_headers.append(scale_track_header)
 	
-
 		# ------------------- toggled -------------------
 		toggle_track_header = TrackHeader()
 		toggle_track = Track()
@@ -332,10 +365,19 @@ def make_coord_entries(anm_armature: AnmArmature, struct_references: List[NuccSt
 				toggle_track_header.frame_count = len(toggle_keyframes.items())
 
 				toggle_track.keys.append(NuccAnmKey.Float(value[0]))
+		else: # If there is no toggle channel, we should still add it
+			toggle_track_header.track_index = 3
+			toggle_track_header.key_format = NuccAnmKeyFormat.FloatFixed
+			toggle_track_header.frame_count = 1
 
-		
+			toggle_track.keys.append(NuccAnmKey.Float(1.0))
+			
+
+
 		entry.tracks.append(toggle_track)
 		entry.track_headers.append(toggle_track_header)
+
+
 			
 
 		entries.append(entry)
@@ -343,6 +385,103 @@ def make_coord_entries(anm_armature: AnmArmature, struct_references: List[NuccSt
 	return entries
 
 
+def make_camera_entries(camera: bpy.types.Camera) -> List[AnmEntry]:
+	context = bpy.context
+
+	entries: List[AnmEntry] = list()
+
+	translations: List[Vector] = list()
+	rotations: List[Vector] = list()
+	fov: List[float] = list()
+
+
+	# Get the camera's location + rotation matrix for each frame
+	for frame in range(context.scene.frame_start, context.scene.frame_end + 1):
+		# Last sanity check to see if camera has animation data
+		if not camera.animation_data:
+			continue
+
+		context.scene.frame_set(frame)
+
+		translations.append(camera.matrix_world.to_translation().copy())
+		rotations.append( camera.matrix_world.to_quaternion().copy())
+		fov.append(fov_from_blender(camera.data.sensor_width, camera.data.lens))
+
+
+	# ------------------- entry -------------------
+	entry = AnmEntry()
+	entry.coord = AnmCoord(-1, 0)
+	entry.entry_format = EntryFormat.Camera
+
+	
+	# ------------------- location -------------------
+	location_track_header = TrackHeader()
+	location_track = Track()
+
+	for frame, value in enumerate(translations):
+		if len(translations) > 1:
+			location_track_header.track_index = 0
+			location_track_header.key_format = NuccAnmKeyFormat.Vector3Linear
+			location_track_header.frame_count = len(translations) + 1
+
+			converted_value = convert_object_value("location", value[:], frame)
+
+			location_track.keys.append(converted_value)
+
+		
+	
+	null_key: NuccAnmKey = NuccAnmKey.Vec3Linear(-1, location_track.keys[-1].values)
+	location_track.keys.append(null_key)
+
+	entry.tracks.append(location_track)
+	entry.track_headers.append(location_track_header)
+
+	# ------------------- rotation quaternion -------------------
+	rotation_track_header = TrackHeader()
+	rotation_track = Track()
+
+	for frame, value in enumerate(rotations):
+		if len(rotations) > 1:
+			rotation_track_header.track_index = 1
+			rotation_track_header.key_format = NuccAnmKeyFormat.QuaternionShortTable
+			rotation_track_header.frame_count = len(rotations)
+
+			converted_value = convert_object_value("rotation_quaternion", value[:])
+
+			rotation_track.keys.append(converted_value)
+	
+	entry.tracks.append(rotation_track)
+
+	print(entry.tracks)
+	entry.track_headers.append(rotation_track_header)
+
+	# ------------------- FOV -------------------
+	fov_track_header = TrackHeader()
+	fov_track = Track()
+
+	for frame, value in enumerate(fov):
+		if len(fov) > 1:
+			fov_track_header.track_index = 2
+			fov_track_header.key_format = NuccAnmKeyFormat.FloatLinear
+			fov_track_header.frame_count = len(fov) + 1
+
+			converted_value = convert_object_value("fov", [value], frame)
+
+			fov_track.keys.append(converted_value)
+	
+	null_key: NuccAnmKey = NuccAnmKey.FloatLinear(-1, fov_track.keys[-1].values)
+	fov_track.keys.append(null_key)
+
+	entry.tracks.append(fov_track)
+	entry.track_headers.append(fov_track_header)
+
+	entries.append(entry)
+
+
+	return entries
+
+
+		
 	
 def main():
 	xfbin = Xfbin()
@@ -355,13 +494,18 @@ def main():
 		page = XfbinPage()
 
 
-		"""camera = NuccCamera()
-		camera.struct_info = NuccStructInfo("camera01", "nuccChunkCamera", ANM_CHUNK_PATH)
-		camera.fov = 45.0
+		nucc_camera = NuccCamera()
+		nucc_camera.struct_info = NuccStructInfo("camera01", "nuccChunkCamera", ANM_CHUNK_PATH)
+		nucc_camera.fov = 45.0
 
-		page.structs.append(camera)"""
+		page.structs.append(nucc_camera)
 
-		anm = make_anm(prop)
+		camera = bpy.context.scene.camera
+		if not camera:
+			print("No camera found in the scene")
+			return
+	
+		anm = make_anm(prop, camera)
 
 		page.structs.append(anm)
 
