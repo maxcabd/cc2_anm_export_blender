@@ -3,6 +3,9 @@ Animation exporter for CyberConnect2 games (Ultimate Ninja Storm / All Star Batt
 
 Uses [xfbin-rs-py](https://github.com/maxcabd/xfbin-rs-py) for writing XFBIN files.
 
+# Requirements
+Requires the XFBIN Blender addon for versions `3.65` and below, get it [here](https://github.com/maxcabd/cc2_xfbin_blender_anm/releases)
+
 # Installing
 Download the [latest release](https://github.com/SutandoTsukai181/cc2_xfbin_blender/releases/latest) and install it in Blender. To do so, follow the instructions in the [official Blender manual](https://docs.blender.org/manual/en/latest/editors/preferences/addons.html) for installing add-ons, or follow the brief instructions below.
 
