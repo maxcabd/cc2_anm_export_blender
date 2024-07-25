@@ -14,3 +14,4 @@ Open the `Edit` -> `Preferences` window from the menu bar, go to `Add-ons`, clic
 ## Credits
 - Thanks to [TheLeonX](https://www.youtube.com/c/TheLeonx) for supporting the project with importing / exporting correct bone transformations, material animations, and more.
 - A big thanks to [SutandoTsukai181](https://github.com/mosamadeeb) for his initial work on the animation importer and for reversing the animation tracks from the .xfbin files.
+- And HallucinatingGenius for his donations ❤️
