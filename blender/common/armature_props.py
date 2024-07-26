@@ -36,7 +36,7 @@ class AnmArmature:
 
 		for curve in action.fcurves:
 			data_path = curve.data_path.rpartition('.')[0]
-			if (data_path is not ""):
+			if (data_path != ""):
 				bone = self.armature.path_resolve(data_path)
 				anm_bones.append(bone)
 
@@ -107,26 +107,23 @@ class AnmArmature:
 			coord_info = [x for x in self.nucc_struct_infos if x.chunk_name == bone and x.chunk_type == "nuccChunkCoord"][0]
 			coord_references.append(NuccStructReference(bone, coord_info))
 
+		for mat in self.materials:
+			mat_info = [x for x in self.nucc_struct_infos if x.chunk_name == mat and x.chunk_type == "nuccChunkMaterial"][0]
+			mat_references.append(NuccStructReference(mat, mat_info))
+
 		for model in self.models:
 			model_info = [x for x in self.nucc_struct_infos if x.chunk_name == model and x.chunk_type == "nuccChunkModel"][0]
 			model_references.append(NuccStructReference(model, model_info))
 		
-		for mat in self.materials:
-			mat_info = [x for x in self.nucc_struct_infos if x.chunk_name == mat and x.chunk_type == "nuccChunkMaterial"][0]
-			mat_references.append(NuccStructReference(mat, mat_info))
-		
-
-
 		clump_info = [x for x in self.nucc_struct_infos if x.chunk_name == self.name][0]
 
 		if self.models:
 			clump_reference = NuccStructReference(self.models[0], clump_info)
 			
-
 		else:
 			clump_reference = NuccStructReference(self.bones[0], clump_info)
 			
 
-		struct_references.extend([clump_reference, *coord_references, *model_references, *mat_references])
+		struct_references.extend([clump_reference, *coord_references, *mat_references, *model_references])
 
 		return struct_references		

@@ -1,9 +1,10 @@
 import bpy
+from os import path
 from collections import defaultdict
 from typing import Dict, List
 
 from bpy_extras.io_utils import ExportHelper
-from bpy.props import (EnumProperty, StringProperty)
+from bpy.props import (EnumProperty, StringProperty, BoolProperty)
 from bpy.types import Operator, Bone, ActionGroup, FCurve
 
 
@@ -45,13 +46,24 @@ class ExportAnmXfbin(Operator, ExportHelper):
 		description='The collection to be exported. All animations in the collection will be converted and put in the same XFBIN',
 	)
 
+	inject_to_xfbin: BoolProperty(
+		name='Inject to existing XFBIN',
+		description='If True, will add (or overwrite) the exportable animations as pages in the selected XFBIN.\n'
+		'If False, will create a new XFBIN and overwrite the old file if it exists.\n\n'
+		'NOTE: If True, the selected path has to be an XFBIN file that already exists, and that file will be overwritten',
+		default=False,
+	)
+
 	def draw(self, context):
 		layout = self.layout
 
-		layout.use_property_split = True
-		layout.use_property_decorate = True  # No animation.
+		layout.label(text='Select a collection to export:')
+		layout.prop_search(self, 'collection', bpy.data, 'collections')
 
-		layout.prop(self, 'collection')
+		if self.collection:
+			inject_row = layout.row()
+			inject_row.prop(self, 'inject_to_xfbin')
+		
 
 		 
 	def execute(self, context):
@@ -66,38 +78,67 @@ class ExportAnmXfbin(Operator, ExportHelper):
 		return {'FINISHED'}
 	
 class AnmXfbinExporter:
+	xfbin: Xfbin
+
 	def __init__(self, operator: Operator, filepath: str, export_settings: dict):
 		self.operator = operator
 		self.filepath = filepath
 		self.collection: bpy.types.Collection = bpy.data.collections[export_settings.get('collection')]
+		self.inject_to_xfbin = export_settings.get('inject_to_xfbin')
 
-		self.xfbin = Xfbin()
 
-
+	
 	def export_collection(self, context):
+		self.xfbin = Xfbin()
 		self.xfbin.version = 121
+
+		if self.inject_to_xfbin:
+			if not path.isfile(self.filepath):
+				raise Exception(f'Cannot inject XFBIN - File does not exist: {self.filepath}')
+
+			self.xfbin = read_xfbin(self.filepath)
 
 		anm_chunks_obj = self.collection.objects.get(f'{XFBIN_ANIMATIONS_OBJ} [{self.collection.name}]')
 		anm_chunks_data = anm_chunks_obj.xfbin_anm_chunks_data
 
 		for anm_chunk in anm_chunks_data.anm_chunks:
 			page = XfbinPage()
-			nucc_anm: NuccAnm = self.make_anm(anm_chunk)
-
-			page.structs.append(nucc_anm)
 			page.struct_infos.append(NuccStructInfo("", "nuccChunkNull", ""))
 
+		
 			for clump in self.make_anm_armatures(anm_chunk):
 				page.struct_infos.extend(clump.nucc_struct_infos)
 				page.struct_references.extend(clump.nucc_struct_references)
+				
+		
+			if anm_chunk.cameras:
+				for camera_chunk in anm_chunk.cameras:
+					camera = bpy.data.objects[camera_chunk.name]
+					struct_info = NuccStructInfo(camera_chunk.name, "nuccChunkCamera", camera_chunk.path)
+					nucc_camera = NuccCamera()
+					nucc_camera.struct_info = struct_info
+					nucc_camera.fov = fov_from_blender(camera.data.sensor_width, camera.data.lens)
+					page.structs.append(nucc_camera)
+			
+			
+			nucc_anm: NuccAnm = self.make_anm(anm_chunk, page.struct_infos)
+			page.structs.append(nucc_anm)
+			
 
-			self.xfbin.pages.append(page)
+			if self.inject_to_xfbin:
+				# Replace the old anm page with the new one
+				for i, page in enumerate(self.xfbin.pages):
+					if any([struct_info.chunk_name == anm_chunk.name for struct_info in page.struct_infos]):
+						self.xfbin.pages[i] = page
+						break
 
+			else:
+				self.xfbin.pages.append(page)
+
+			
 		write_xfbin(self.xfbin, self.filepath)
 
 
-
-		
 	def make_anm_armatures(self, anm_chunk: XfbinAnmChunkPropertyGroup) -> List[AnmArmature]:
 		"""
 		Return list of armatures that contain animation data.
@@ -120,22 +161,19 @@ class AnmXfbinExporter:
 		return anm_armatures
 
 
-	def make_anm(self, anm_chunk: XfbinAnmChunkPropertyGroup) -> NuccAnm:
+	def make_anm(self, anm_chunk: XfbinAnmChunkPropertyGroup, struct_infos: List[NuccStructInfo]) -> NuccAnm:
 		"""
 		Return NuccAnm object from AnmProp object.
 		"""
-
 		anm_armatures = self.make_anm_armatures(anm_chunk)
-
 
 		anm = NuccAnm()
 		anm.struct_info = NuccStructInfo(f"{anm_chunk.name}", "nuccChunkAnm", anm_chunk.path)
+
 		anm.is_looped = anm_chunk.is_looped
 		anm.frame_count = anm_chunk.frame_count * 100
-		# Test for adding other entries
-		#anm.other_entries_indices = [0]
 
-		# Combined struct references from all armatures for this AnmProp
+		# Combined struct references from all armatures for this animation
 		struct_references: List[NuccStructReference] = [ref for armature in anm_armatures for ref in armature.nucc_struct_references]
 
 		anm.clumps.extend(self.make_anm_clump(anm_armatures, struct_references))
@@ -144,12 +182,12 @@ class AnmXfbinExporter:
 		for armature in anm_armatures:
 			anm.entries.extend(self.make_coord_entries(armature, struct_references, anm.clumps))
 
-
 		if anm_chunk.cameras:
-			for camera_chunk in anm_chunk.cameras:
+			for index, camera_chunk in enumerate(anm_chunk.cameras):
 				camera = bpy.data.objects[camera_chunk.name]
-				anm.entries.extend(make_camera_entries(camera))
-			
+				anm.entries.extend(self.make_camera_entries(camera, index))
+				anm.other_entries_indices.append(len(struct_infos) + index)
+
 		return anm
 			
 	def make_anm_clump(self, anm_armatures: List[AnmArmature], struct_references: List[NuccStructReference]) -> List[AnmClump]:
@@ -166,6 +204,8 @@ class AnmXfbinExporter:
 				clump.clump_index = struct_references.index(NuccStructReference(anm_armature.bones[0], NuccStructInfo(anm_armature.name, "nuccChunkClump", anm_armature.chunk_path)))
 					
 			bone_material_indices: List[int] = list()
+
+			
 
 			bone_indices: List[int] = [struct_references.index(NuccStructReference(bone, NuccStructInfo(bone, "nuccChunkCoord", anm_armature.chunk_path))) for bone in anm_armature.bones]
 			mat_indices: List[int] = [struct_references.index(NuccStructReference(mat, NuccStructInfo(mat, "nuccChunkMaterial", anm_armature.chunk_path))) for mat in anm_armature.materials]
@@ -220,7 +260,8 @@ class AnmXfbinExporter:
 
 		
 		# Filter the groups that aren't in anm_armature.anm_bones
-		groups: List[ActionGroup] = [group for group in anm_armature.action.groups.values() if group.name in [bone.name for bone in anm_armature.anm_bones]]
+		bone_names: List[str] = [bone.name for bone in anm_armature.anm_bones]
+		groups: List[ActionGroup] = [group for group in anm_armature.action.groups.values() if group.name in bone_names]
 
 		for group in groups:
 			# ------------------- fcurves -------------------
@@ -441,7 +482,7 @@ class AnmXfbinExporter:
 		return entries
 
 
-	def make_camera_entries(self, camera: bpy.types.Camera) -> List[AnmEntry]:
+	def make_camera_entries(self, camera: bpy.types.Camera, other_index: int) -> List[AnmEntry]:
 		context = bpy.context
 
 		entries: List[AnmEntry] = list()
@@ -466,7 +507,7 @@ class AnmXfbinExporter:
 
 		# ------------------- entry -------------------
 		entry = AnmEntry()
-		entry.coord = AnmCoord(-1, 0)
+		entry.coord = AnmCoord(-1, other_index)
 		entry.entry_format = EntryFormat.Camera
 
 		
@@ -506,6 +547,7 @@ class AnmXfbinExporter:
 
 				rotation_track.keys.append(converted_value)
 		
+	
 		entry.tracks.append(rotation_track)
 		entry.track_headers.append(rotation_track_header)
 
@@ -535,5 +577,6 @@ class AnmXfbinExporter:
 		return entries
 
 
+
 def menu_func_export(self, context):
-    self.layout.operator(ExportAnmXfbin.bl_idname, text='XFBIN Animation Container (.xfbin)')
+	self.layout.operator(ExportAnmXfbin.bl_idname, text='XFBIN Animation Container (.xfbin)')

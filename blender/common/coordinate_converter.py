@@ -133,7 +133,6 @@ def convert_object_value(data_path: str, values: List[float], frame: int = 0) ->
 			return NuccAnmKey.ShortVec4(rotate_quaternion(values))
 		
 		case 'fov':
-			print(values)
 			return NuccAnmKey.FloatLinear(frame * 100, values[0])
 		
 	

@@ -15,12 +15,9 @@ def register():
 
     bpy.types.TOPBAR_MT_file_export.append(menu_func_export)
 
-    
-
 
 def unregister():
     for c in classes:
         bpy.utils.unregister_class(c)
    
     bpy.types.TOPBAR_MT_file_export.remove(menu_func_export)
-
