@@ -101,10 +101,6 @@ def convert_bone_value(anm_armature: AnmArmature, bone_name: str, data_path: str
 			scale = Vector([abs(seq) for seq in values])[:]
 			return NuccAnmKey.Vec3(tuple(scale))
 		
-
-
-	
-
 	return values
 
 
@@ -135,5 +131,8 @@ def convert_object_value(data_path: str, values: List[float], frame: int = 0) ->
 		case 'fov':
 			return NuccAnmKey.FloatLinear(frame * 100, values[0])
 		
+		case 'color':
+			color = [int(x * 255) for x in values]
+			return NuccAnmKey.Color(tuple(color))
 	
-
+	return values
