@@ -69,7 +69,7 @@ class AnmArmature:
 		
 	@property
 	def models(self) -> List[str]:
-		models = self.armature.xfbin_clump_data.models
+		models = self.armature.data.children
 		
 		return [model.name for model in models if not 'lod' in model.name]
 	
