@@ -1,3 +1,5 @@
+import bpy
+
 from bpy.types import Armature, Bone, Action
 from typing import List
 
@@ -7,7 +9,7 @@ from ...xfbin.xfbin_lib import NuccStructInfo, NuccStructReference
 class AnmArmature:
 	armature: Armature
 
-	def __init__(self, arm_obj):
+	def __init__(self, arm_obj: Armature):
 		self.armature = arm_obj
 	
 	@property
@@ -51,9 +53,19 @@ class AnmArmature:
 
 	@property
 	def materials(self) -> List[str]:
-		materials = self.armature.xfbin_clump_data.materials
+		materials = set()
+		model_names = {model.name for model in self.armature.xfbin_clump_data.models}
 
-		return sorted([mat.name for mat in materials if not 'lod' in mat.name])
+		for obj in bpy.data.objects:
+			if obj.name in model_names:
+				for child in obj.children:
+					for material_slot in child.material_slots:
+						material = bpy.data.materials.get(material_slot.name)
+						if material and 'lod' not in material.name:
+							materials.add(material)
+							
+
+		return sorted(material.name for material in materials)
 		
 	@property
 	def models(self) -> List[str]:
@@ -126,4 +138,40 @@ class AnmArmature:
 
 		struct_references.extend([clump_reference, *coord_references, *mat_references, *model_references])
 
-		return struct_references		
+		return struct_references
+	
+	def make_extra_clump_references(self, reference_anm_armature: Armature, reference_anm_armature_name: str) -> List[NuccStructReference]:
+		struct_references: List[NuccStructReference] = list()
+
+		coord_references: List[NuccStructReference] = list()
+		model_references: List[NuccStructReference] = list()
+		mat_references: List[NuccStructReference] = list()
+
+
+		for bone in self.bones:
+			coord_info = [x for x in reference_anm_armature.nucc_struct_infos if x.chunk_name == bone and x.chunk_type == "nuccChunkCoord"][0]
+			coord_references.append(NuccStructReference(bone, coord_info))
+
+		for mat in self.materials:
+			mat_info = [x for x in reference_anm_armature.nucc_struct_infos if x.chunk_name == mat and x.chunk_type == "nuccChunkMaterial"][0]
+			mat_references.append(NuccStructReference(mat, mat_info))
+
+		for model in self.models:
+			model_info = [x for x in reference_anm_armature.nucc_struct_infos if x.chunk_name == model and x.chunk_type == "nuccChunkModel"][0]
+			model_references.append(NuccStructReference(model, model_info))
+		
+		clump_info = [x for x in reference_anm_armature.nucc_struct_infos if x.chunk_name == reference_anm_armature.name][0]
+
+		if reference_anm_armature.models:
+			clump_reference = NuccStructReference(reference_anm_armature.models[0], clump_info)
+			
+		else:
+			clump_reference = NuccStructReference(reference_anm_armature.bones[0], clump_info)
+			
+
+		struct_references.extend([clump_reference, *coord_references, *mat_references, *model_references])
+
+		return struct_references
+
+
+
