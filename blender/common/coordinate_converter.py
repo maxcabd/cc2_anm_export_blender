@@ -53,26 +53,40 @@ def convert_bone_value(anm_armature: AnmArmature, bone_name: str, data_path: str
 	
 
 	def translate(seq: List[float]) -> Tuple[float]:
+		loc, rot, _ = edit_matrix.decompose()
 		if has_parent:
-			loc, rot, _ = edit_matrix.decompose()
+			
 			translation = Vector(seq)
 			translation.rotate(rot)
 
 			return tuple(pos_m_to_cm_tuple((translation + loc)[:]))
+		else:
+			translation = Vector(seq)
+			return tuple(pos_m_to_cm_tuple(translation + loc)[:])
 		
 	
 	def rotate_euler(seq: List[float]) -> Tuple[int, int, int]:
+		_, rot, _ = edit_matrix.decompose()
 		if has_parent:
-			_, rot, _ = edit_matrix.decompose()
 			rotation = rot @ Euler(seq).to_quaternion().inverted().to_euler('ZYX')
 			rotation = rot_to_blender(rotation)
 			return tuple(rot_from_blender(rotation))
-					
+		else:
+			rotation = Euler(seq).to_quaternion().inverted().to_euler('ZYX')
+			rotation = rot_to_blender(rotation)
+			return tuple(rot_from_blender(rotation))
+	
+
 	def rotate_quaternion(seq: List[float]) -> Tuple[int, int, int, int]:
+		_, rot, _ = edit_matrix.decompose()
 		if has_parent:
-			_, rot, _ = edit_matrix.decompose()
 			rotation = Quaternion(seq)
 			rotation = (rot @ rotation).inverted()
+			# Swizzle the quaternion to match the game's format to x, y, z, w
+			rotation = Quaternion((rotation.x, rotation.y, rotation.z, rotation.w))
+			return tuple(rotation)
+		else:
+			rotation = Quaternion(seq).inverted()
 			# Swizzle the quaternion to match the game's format to x, y, z, w
 			rotation = Quaternion((rotation.x, rotation.y, rotation.z, rotation.w))
 			return tuple(rotation)

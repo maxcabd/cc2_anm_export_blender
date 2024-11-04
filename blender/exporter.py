@@ -56,6 +56,14 @@ class ExportAnmXfbin(Operator, ExportHelper):
 		default=True,
 	)
 
+	"""inject_to_clump: BoolProperty(
+		name='Inject to an existing Clump',
+		description='If True, will add (or overwrite) the Clump animation(s) in the selected ANM in the XFBIN\n'
+		'If False, will create a new Clump and overwrite the old file if it exists.\n\n'
+		'NOTE: "Inject to existing XFBIN" has to be enabled for this option to take effect\n',					
+		default=True,
+	)"""
+
 	def draw(self, context):
 		layout = self.layout
 
@@ -86,7 +94,7 @@ class AnmXfbinExporter:
 		self.filepath = filepath
 		self.collection: bpy.types.Collection = bpy.data.collections[export_settings.get('collection')]
 		self.inject_to_xfbin = export_settings.get('inject_to_xfbin')
-
+		
 
 	
 	def export_collection(self, context):
@@ -98,20 +106,25 @@ class AnmXfbinExporter:
 				raise Exception(f'Cannot inject XFBIN - File does not exist: {self.filepath}')
 
 			self.xfbin = read_xfbin(self.filepath)
+		else:
+			self.inject_to_clump = False
 
-		anm_chunks_obj = self.collection.objects.get(f'{XFBIN_ANIMATIONS_OBJ} [{self.collection.name}]')
+		anm_chunks_obj = self.collection.objects.get(f'{XFBIN_ANMS_OBJ} [{self.collection.name}]')
 		anm_chunks_data = anm_chunks_obj.xfbin_anm_chunks_data
 
 		for anm_chunk in anm_chunks_data.anm_chunks:
+
 			page = XfbinPage()
 			page.struct_infos.append(NuccStructInfo("", "nuccChunkNull", ""))
 
-		
+
+			anm_chunk_name = anm_chunk.name.split(' (')[0] if ' (' in anm_chunk.name else anm_chunk.name # Remove suffix if it exists
+
 			for clump in self.make_anm_armatures(anm_chunk):
 				page.struct_infos.extend(clump.nucc_struct_infos)
 				page.struct_references.extend(clump.nucc_struct_references)
-				
-		
+
+	
 			if anm_chunk.cameras:
 				for camera_chunk in anm_chunk.cameras:
 					camera = bpy.data.objects[camera_chunk.name]
@@ -119,8 +132,62 @@ class AnmXfbinExporter:
 
 					nucc_camera = NuccCamera()
 					nucc_camera.struct_info = NuccStructInfo(camera_name, "nuccChunkCamera", camera_chunk.path)
+					
 					nucc_camera.fov = fov_from_blender(camera.data.sensor_width, camera.data.lens)
 					page.structs.append(nucc_camera)
+			
+			if anm_chunk.lightdircs:
+				for light_prop in anm_chunk.lightdircs:
+					lightdirc = bpy.data.objects[light_prop.name]
+					lightdirc_name = light_prop.name.split(' (')[0] if ' (' in light_prop.name else light_prop.name
+
+					nucc_lightdirc = NuccLightDirc()
+					nucc_lightdirc.s
+					nucc_lightdirc.struct_info = NuccStructInfo(lightdirc_name, "nuccChunkLightDirc", light_prop.path)
+
+					nucc_lightdirc.color = lightdirc.data.color
+					nucc_lightdirc.energy = lightdirc.data.energy
+
+					converted_value: List[int] = convert_object_value("rotation_quaternion", lightdirc.matrix_world.to_quaternion().copy()[:]).values
+					nucc_lightdirc.rotation = list(map(lambda x: x / QUAT_COMPRESS, converted_value))
+
+					page.structs.append(nucc_lightdirc)
+			
+			if anm_chunk.lightpoints:
+				for light_prop in anm_chunk.lightpoints:
+					lightpoint = bpy.data.objects[light_prop.name]
+					lightpoint_name = light_prop.name.split(' (')[0] if ' (' in light_prop.name else light_prop.name
+
+					nucc_lightpoint = NuccLightPoint()
+					nucc_lightpoint.struct_info = NuccStructInfo(lightpoint_name, "nuccChunkLightPoint", light_prop.path)
+
+					nucc_lightpoint.color = lightpoint.data.color
+					nucc_lightpoint.energy = lightpoint.data.energy
+
+					converted_value: List[int] = convert_object_value("location", lightpoint.matrix_world.to_translation().copy()[:]).values
+					nucc_lightpoint.location = converted_value
+
+					nucc_lightpoint.radius = lightpoint.data.shadow_soft_size
+					
+					if lightpoint.data.use_custom_distance:
+						nucc_lightpoint.cutoff = lightpoint.data.cutoff_distance
+					else:
+						nucc_lightpoint.cutoff = 0.0
+
+					page.structs.append(nucc_lightpoint)
+			
+			if anm_chunk.ambients:
+				for light_prop in anm_chunk.ambients:
+					ambient_obj = bpy.data.objects[light_prop.name]
+					ambient_name = light_prop.name.split(' (')[0] if ' (' in light_prop.name else light_prop.name
+
+					nucc_ambient = NuccAmbient()
+					nucc_ambient.struct_info = NuccStructInfo(ambient_name, "nuccChunkAmbient", light_prop.path)
+
+					nucc_ambient.color = ambient_obj.data.color
+					nucc_ambient.energy = ambient_obj.data.energy
+
+					page.structs.append(nucc_ambient)
 			
 			
 			nucc_anm: NuccAnm = self.make_anm(anm_chunk, page.struct_infos)
@@ -130,16 +197,15 @@ class AnmXfbinExporter:
 			if self.inject_to_xfbin:
 				# Add page or overwrite existing page
 				for i, p in enumerate(self.xfbin.pages):
-					if any(struct_info.chunk_name == anm_chunk.name for struct_info in p.struct_infos):
+					if any(struct_info.chunk_name == anm_chunk_name for struct_info in p.struct_infos):
 						self.xfbin.pages[i] = page
 						break
 				else:
 					self.xfbin.pages.append(page)
+			else:
+				self.xfbin.pages.append(page)
 
-					
 			
-			self.xfbin.pages.append(page)
-
 			
 		write_xfbin(self.xfbin, self.filepath)
 
@@ -150,12 +216,17 @@ class AnmXfbinExporter:
 		"""
 		anm_armatures: List[AnmArmature] = list()
 
-		for index, clump in enumerate(anm_chunk.anm_clumps):
-			arm_obj: Armature = bpy.data.objects[clump.name]
+		for index, clump_props in enumerate(anm_chunk.anm_clumps):
+			clump_props: XfbinAnmClumpPropertyGroup
 
+			arm_obj: Armature = bpy.data.objects.get(clump_props.name)
+
+			if not arm_obj:
+				continue
+   
 			if arm_obj.animation_data:
 				if index == 0:
-					action = bpy.data.actions.get(f'{anm_chunk.name}')
+					action = bpy.data.actions.get(f'{anm_chunk.name} ({clump_props.name})')
 				else:
 					action = arm_obj.animation_data.action
 
@@ -173,7 +244,9 @@ class AnmXfbinExporter:
 		anm_armatures = self.make_anm_armatures(anm_chunk)
 
 		anm = NuccAnm()
-		anm.struct_info = NuccStructInfo(f"{anm_chunk.name}", "nuccChunkAnm", anm_chunk.path)
+
+		anm_name = anm_chunk.name.split(' (')[0] if ' (' in anm_chunk.name else anm_chunk.name
+		anm.struct_info = NuccStructInfo(f"{anm_name}", "nuccChunkAnm", anm_chunk.path)
 
 		anm.is_looped = anm_chunk.is_looped
 		anm.frame_count = anm_chunk.frame_count * 100
@@ -186,12 +259,33 @@ class AnmXfbinExporter:
 
 		for armature in anm_armatures:
 			anm.entries.extend(self.make_coord_entries(armature, struct_references, anm.clumps))
+			if anm_chunk.export_material_animations:
+				anm.entries.extend(self.make_material_entries(armature, struct_references, anm.clumps))
+
 
 		if anm_chunk.cameras:
 			for index, camera_chunk in enumerate(anm_chunk.cameras):
 				camera = bpy.data.objects[camera_chunk.name]
 				anm.entries.extend(self.make_camera_entries(camera, index))
 				anm.other_entries_indices.append(len(struct_infos) + index)
+
+		if anm_chunk.lightdircs:
+			for index, light_prop in enumerate(anm_chunk.lightdircs):
+				lightdirc = bpy.data.objects[light_prop.name]
+				anm.entries.extend(self.make_lightdirc_entries(lightdirc, index + len(anm_chunk.cameras)))
+				anm.other_entries_indices.append(len(struct_infos) + index + len(anm_chunk.cameras))
+		
+		if anm_chunk.lightpoints:
+			for index, light_prop in enumerate(anm_chunk.lightpoints):
+				lightpoint = bpy.data.objects[light_prop.name]
+				anm.entries.extend(self.make_lightpoint_entries(lightpoint, index + len(anm_chunk.cameras) + len(anm_chunk.lightdircs)))
+				anm.other_entries_indices.append(len(struct_infos) + index + len(anm_chunk.cameras) + len(anm_chunk.lightdircs))
+
+		if anm_chunk.ambients:
+			for index, light_prop in enumerate(anm_chunk.ambients):
+				ambient = bpy.data.objects[light_prop.name]
+				anm.entries.extend(self.make_ambient_entries(ambient, index + len(anm_chunk.cameras) + len(anm_chunk.lightdircs) + len(anm_chunk.lightpoints)))
+				anm.other_entries_indices.append(len(struct_infos) + index + len(anm_chunk.cameras) + len(anm_chunk.lightdircs) + len(anm_chunk.lightpoints))
 
 		return anm
 			
@@ -429,10 +523,13 @@ class AnmXfbinExporter:
 			toggle_track = Track()
 
 			toggle_keyframes = defaultdict(list)
+
 			if any(toggle_curves):
 				if toggle_curves[0]:
 					keyframes = [kp.co[0] for kp in toggle_curves[0].keyframe_points]
+
 					values = [toggle_curves[0].evaluate(kp.co[0]) for kp in toggle_curves[0].keyframe_points]
+
 					for frame, value in zip(keyframes, values):
 						toggle_keyframes[int(frame)].append(value)
 
@@ -442,7 +539,7 @@ class AnmXfbinExporter:
 
 				toggle_track.keys = [
 					NuccAnmKey.Float(value[0])
-					for frame, value in toggle_keyframes.items()
+					for _, value in toggle_keyframes.items()
 				]
 			else:
 				toggle_track_header.track_index = 3
@@ -457,7 +554,138 @@ class AnmXfbinExporter:
 			entries.append(entry)
 
 		return entries
+	
 
+	def make_material_entries(self, anm_armature: AnmArmature, struct_references: List[NuccStructReference], clumps: List[AnmClump]) -> List[AnmEntry]:
+		context = bpy.context
+
+		entries: List[AnmEntry] = list()
+
+		def get_node_input_default(node_name: str, input_index: int):
+			node = nodes.get(node_name)
+			if node:
+				return node.inputs[input_index].default_value
+			return [0, 0, 0]
+		
+
+		def get_node_output_default(node_name: str, output_index: int):
+			node = nodes.get(node_name)
+			if node:
+				return node.outputs[output_index].default_value
+			return 0
+		
+		def create_and_append_track(entry: AnmEntry, track_index: int, key_format: NuccAnmKeyFormat, values: List[float]):
+			""" Create helper method since most material entries have the same structure """
+			track_header = TrackHeader()
+			track_header.track_index = track_index
+
+			if track_index == 4:
+				track_header.key_format = NuccAnmKeyFormat.FloatFixed
+				track_header.frame_count = 1
+
+			track_header.key_format = key_format
+			track_header.frame_count = len(values)
+
+			track = Track()
+
+			for value in values:
+				converted_value: NuccAnmKey = NuccAnmKey.Float(value)
+				track.keys.append(converted_value)
+
+			entry.tracks.append(track)
+			entry.track_headers.append(track_header)
+
+
+		for material_name in anm_armature.materials:
+			material = bpy.data.materials.get(material_name)
+
+			if not material:
+				continue
+
+			if not material.node_tree.animation_data:
+				continue
+
+			
+			nodes = material.node_tree.nodes
+
+			u1_location: List[float] = list()
+			v1_location: List[float] = list()
+
+			u1_scale: List[float] = list()
+			v1_scale: List[float] = list()
+
+			u2_location: List[float] = list()
+			v2_location: List[float] = list()
+			
+			u2_scale: List[float] = list()
+			v2_scale: List[float] = list()
+
+			blend_values: List[float] = list()
+			glare_values: List[float] = list()
+			alpha_values: List[float] = list()
+
+
+			for frame in range(context.scene.frame_start, context.scene.frame_end + 1):
+				context.scene.frame_set(frame)
+
+				uv1_translation = get_node_input_default("Mapping", 1) if "Mapping" in nodes else get_node_input_default("UV_0_Mapping", 1)
+				uv1_scale = get_node_input_default("Mapping", 3) if "Mapping" in nodes else get_node_input_default("UV_0_Mapping", 3)
+
+				uv2_location = get_node_input_default("UV_1_Mapping", 1)
+				uv2_scale = get_node_input_default("UV_1_Mapping", 3) if "UV_1_Mapping" in nodes else [1, 1, 1]
+
+
+				u1_location.append(uv1_translation[0])
+				v1_location.append((-1 * uv1_scale[1]) + (1 - uv1_translation[1])) # Invert Y axis and offset by 1 to match game's UV space 
+				u1_scale.append(uv1_scale[0])
+				v1_scale.append(uv1_scale[1])
+
+				u2_location.append(uv2_location[0])
+				v2_location.append((-1 * uv2_scale[1])+ (1 - uv2_location[1])) 
+				u2_scale.append(uv2_scale[0])
+				v2_scale.append(uv2_scale[1])
+
+				blend_values.append(get_node_output_default("BlendRate", 0) if "BlendRate" in nodes else 0)
+				glare_values.append(get_node_output_default("Glare", 0) if "Glare" in nodes else 0.12)
+				alpha_values.append(get_node_output_default("Alpha", 0) if "Alpha" in nodes else 205.0)
+			
+			# Value is a (track, track_index) tuple
+			material_data_paths = {
+				"u1_location": (u1_location, 0),
+				"v1_location": (v1_location, 1),
+				"u1_scale": (u1_scale, 8),
+				"v1_scale": (v1_scale, 9),
+				"u2_location": (u2_location, 2),
+				"v2_location": (v2_location, 3),
+				"u2_scale": (u2_scale, 10),
+				"v2_scale": (v2_scale, 11),
+				"blend": (blend_values, 12),
+				"glare": (glare_values, 15),
+				"alpha": (alpha_values, 16),
+				"celshade": ([0.0], 4),
+			}
+
+
+			# ------------------- entry -------------------
+			clump_reference_index = struct_references.index(anm_armature.nucc_struct_references[0])
+			clump_index = next((i for i, clump in enumerate(clumps) if clump.clump_index == clump_reference_index), None)
+
+			material_reference_index = struct_references.index(NuccStructReference(material_name, NuccStructInfo(material_name, "nuccChunkMaterial", anm_armature.chunk_path)))
+			material_index = next((i for i, material in enumerate(clumps[clump_index].bone_material_indices) if material == material_reference_index), None)
+
+			entry = AnmEntry()
+			entry.coord = AnmCoord(clump_index, material_index)
+			entry.entry_format = EntryFormat.Material
+
+			
+			for _, (values, track_index) in material_data_paths.items():
+				create_and_append_track(entry, track_index, NuccAnmKeyFormat.FloatTable, values)
+			
+
+
+			entries.append(entry)
+
+		return entries
 
 
 	def make_camera_entries(self, camera: bpy.types.Camera, other_index: int) -> List[AnmEntry]:
@@ -553,8 +781,283 @@ class AnmXfbinExporter:
 
 
 		return entries
+	
+
+	def make_lightdirc_entries(self, lightdirc: bpy.types.Light, other_index: int) -> List[AnmEntry]:
+		context = bpy.context
+
+		entries: List[AnmEntry] = list()
+
+		colors: List[Vector] = list()
+		energies: List[float] = list()
+		rotations: List[Vector] = list()
+
+		# Get the light's color, energy, and rotation matrix for each frame
+		for frame in range(context.scene.frame_start, context.scene.frame_end + 1):
+			# Last sanity check to see if camera has animation data
+			if not lightdirc.animation_data:
+				continue
+
+			context.scene.frame_set(frame)
+
+			colors.append(lightdirc.data.color.copy())
+			energies.append(lightdirc.data.energy)
+			rotations.append(lightdirc.matrix_world.to_quaternion().copy())
+
+		# ------------------- entry -------------------
+		entry = AnmEntry()
+		entry.coord = AnmCoord(-1, other_index)
+		entry.entry_format = EntryFormat.LightDirc
+
+		# ------------------- color -------------------
+		color_track_header = TrackHeader()
+		color_track = Track()
+
+		for value in colors:
+			color_track_header.track_index = 0
+			color_track_header.key_format = NuccAnmKeyFormat.ColorRGBTable
+			color_track_header.frame_count = len(colors)
+
+			converted_value: NuccAnmKey = convert_object_value("color", list(map(lambda x: round(x, 2), value[:])))
+
+			color_track.keys.append(converted_value)
+
+		# Pad color_track.keys with the last value so the length is a multiple of 4
+		while len(color_track.keys) % 4 != 0:
+			color_track.keys.append(color_track.keys[-1])
+
+		# Update the frame count to reflect the new length
+		color_track_header.frame_count = len(color_track.keys)
+		
+		entry.tracks.append(color_track)
+		entry.track_headers.append(color_track_header)
 
 
+		# ------------------- energy -------------------
+		energy_track_header = TrackHeader()
+		energy_track = Track()
 
+		for value in energies:
+			energy_track_header.track_index = 1
+			energy_track_header.key_format = NuccAnmKeyFormat.FloatTable
+			energy_track_header.frame_count = len(energies)
+
+			energy_track.keys.append(NuccAnmKey.Float(value))
+		
+		entry.tracks.append(energy_track)
+		entry.track_headers.append(energy_track_header)
+
+		# ------------------- rotation quaternion -------------------
+		rotation_track_header = TrackHeader()
+		rotation_track = Track()
+
+		for value in rotations:
+			rotation_track_header.track_index = 2
+			rotation_track_header.key_format = NuccAnmKeyFormat.QuaternionShortTable
+			rotation_track_header.frame_count = len(rotations)
+
+			converted_value: NuccAnmKey = convert_object_value("rotation_quaternion", value[:])
+
+			rotation_track.keys.append(converted_value)
+
+		entry.tracks.append(rotation_track)
+		entry.track_headers.append(rotation_track_header)
+
+		entries.append(entry)
+
+
+		return entries
+
+	def make_lightpoint_entries(self, lightpoint: bpy.types.Light, other_index: int) -> List[AnmEntry]:
+		context = bpy.context
+
+		entries: List[AnmEntry] = list()
+
+		colors: List[Vector] = list()
+		energies: List[float] = list()
+		translations: List[Vector] = list()
+		radii: List[float] = list()
+		cutoffs: List[float] = list()
+
+		# Get the light's color, energy, location, radius, and cutoff for each frame
+		for frame in range(context.scene.frame_start, context.scene.frame_end + 1):
+			# Last sanity check to see if camera has animation data
+			if not lightpoint.animation_data:
+				continue
+
+			context.scene.frame_set(frame)
+
+			colors.append(lightpoint.data.color.copy())
+			energies.append(lightpoint.data.energy)
+			translations.append(lightpoint.matrix_world.to_translation().copy())
+			radii.append(lightpoint.data.shadow_soft_size)
+			cutoffs.append(lightpoint.data.cutoff_distance if lightpoint.data.use_custom_distance else 0.0)
+		
+
+		# ------------------- entry -------------------
+		entry = AnmEntry()
+		entry.coord = AnmCoord(-1, other_index)
+		entry.entry_format = EntryFormat.LightPoint
+
+		# ------------------- color -------------------
+		color_track_header = TrackHeader()
+		color_track = Track()
+
+		for value in colors:
+			color_track_header.track_index = 0
+			color_track_header.key_format = NuccAnmKeyFormat.ColorRGBTable
+			color_track_header.frame_count = len(colors)
+
+			converted_value: NuccAnmKey = convert_object_value("color", list(map(lambda x: round(x, 2), value[:])))
+
+			color_track.keys.append(converted_value)
+		
+		
+		# Pad color_track.keys with the last value so the length is a multiple of 4
+		while len(color_track.keys) % 4 != 0:
+			color_track.keys.append(color_track.keys[-1])
+
+		# Update the frame count to reflect the new length
+		color_track_header.frame_count = len(color_track.keys)
+
+		entry.tracks.append(color_track)
+		entry.track_headers.append(color_track_header)
+
+		# ------------------- energy -------------------
+		energy_track_header = TrackHeader()
+		energy_track = Track()
+
+		for value in energies:
+			energy_track_header.track_index = 1
+			energy_track_header.key_format = NuccAnmKeyFormat.FloatTable
+			energy_track_header.frame_count = len(energies)
+
+			energy_track.keys.append(NuccAnmKey.Float(value))
+
+		entry.tracks.append(energy_track)
+		entry.track_headers.append(energy_track_header)
+
+		# ------------------- location -------------------
+		location_track_header = TrackHeader()
+		location_track = Track()
+
+		for frame, value in enumerate(translations):
+			location_track_header.track_index = 2
+			location_track_header.key_format = NuccAnmKeyFormat.Vector3Linear
+			location_track_header.frame_count = len(translations) + 1
+
+			converted_value: NuccAnmKey = convert_object_value("location", value[:], frame)
+
+			location_track.keys.append(converted_value)
+		
+		null_key = NuccAnmKey.Vec3Linear(-1, location_track.keys[-1].values)
+		location_track.keys.append(null_key)
+
+		entry.tracks.append(location_track)
+		entry.track_headers.append(location_track_header)
+
+		# ------------------- radius -------------------
+		radius_track_header = TrackHeader()
+		radius_track = Track()
+
+		for value in radii:
+			radius_track_header.track_index = 3
+			radius_track_header.key_format = NuccAnmKeyFormat.FloatTable
+			radius_track_header.frame_count = len(radii)
+
+			radius_track.keys.append(NuccAnmKey.Float(value))
+
+		entry.tracks.append(radius_track)
+		entry.track_headers.append(radius_track_header)
+
+		# ------------------- cutoff -------------------
+		cutoff_track_header = TrackHeader()
+		cutoff_track = Track()
+
+		for value in cutoffs:
+			cutoff_track_header.track_index = 4
+			cutoff_track_header.key_format = NuccAnmKeyFormat.FloatTable
+			cutoff_track_header.frame_count = len(cutoffs)
+
+			cutoff_track.keys.append(NuccAnmKey.Float(value))
+
+		entry.tracks.append(cutoff_track)
+		entry.track_headers.append(cutoff_track_header)
+
+		entries.append(entry)
+
+
+		return entries
+
+	def make_ambient_entries(self, ambient: bpy.types.Light, other_index: int) -> List[AnmEntry]:
+		context = bpy.context
+
+		entries: List[AnmEntry] = list()
+
+		colors: List[Vector] = list()
+		energies: List[float] = list()
+
+		# Get the light's color and energy for each frame
+		for frame in range(context.scene.frame_start, context.scene.frame_end + 1):
+			# Last sanity check to see if camera has animation data
+			if not ambient.animation_data:
+				continue
+
+			context.scene.frame_set(frame)
+
+			colors.append(ambient.data.color.copy())
+			energies.append(ambient.data.energy)
+
+		# ------------------- entry -------------------
+		entry = AnmEntry()
+		entry.coord = AnmCoord(-1, other_index)
+
+		entry.entry_format = EntryFormat.Ambient
+
+		# ------------------- color -------------------
+		color_track_header = TrackHeader()
+		color_track = Track()
+
+		for value in colors:
+			color_track_header.track_index = 0
+			color_track_header.key_format = NuccAnmKeyFormat.ColorRGBTable
+			color_track_header.frame_count = len(colors)
+
+			converted_value: NuccAnmKey = convert_object_value("color", list(map(lambda x: round(x, 2), value[:])))
+
+			color_track.keys.append(converted_value)
+		
+		# Pad color_track.keys with the last value so the length is a multiple of 4
+		while len(color_track.keys) % 4 != 0:
+			color_track.keys.append(color_track.keys[-1])
+
+		# Update the frame count to reflect the new length
+		color_track_header.frame_count = len(color_track.keys)
+
+		entry.tracks.append(color_track)
+		entry.track_headers.append(color_track_header)
+
+
+		# ------------------- energy -------------------
+		energy_track_header = TrackHeader()
+		energy_track = Track()
+
+		for value in energies:
+			energy_track_header.track_index = 1
+			energy_track_header.key_format = NuccAnmKeyFormat.FloatTable
+			energy_track_header.frame_count = len(energies)
+
+			energy_track.keys.append(NuccAnmKey.Float(value))
+		
+		entry.tracks.append(energy_track)
+		entry.track_headers.append(energy_track_header)
+
+		entries.append(entry)
+
+
+		return entries
+
+
+		
 def menu_export(self, context):
 	self.layout.operator(ExportAnmXfbin.bl_idname, text='XFBIN Animation Container (.xfbin)')
