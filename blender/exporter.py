@@ -16,7 +16,8 @@ from .common.helpers import *
 from .common.bone_props import *
 from .common.armature_props import *
 from .common.coordinate_converter import *
-
+from cProfile import Profile
+import pstats
 
 class ExportAnmXfbin(Operator, ExportHelper):
 	"""Export current collection as XFBIN file"""
@@ -80,8 +81,16 @@ class ExportAnmXfbin(Operator, ExportHelper):
 
 		start_time = time.time()
 		exporter = AnmXfbinExporter(self, self.filepath, self.as_keywords(ignore=('filter_glob',)))
+  
+		#profiler = Profile()
+		#profiler.enable()
 		exporter.export_collection(context)
 
+		'''profiler.disable()
+		stats = pstats.Stats(profiler)
+		stats.strip_dirs()
+		stats.sort_stats('cumulative')
+		stats.print_stats()'''
 		elapsed_s = "{:.2f}s".format(time.time() - start_time)
 		self.report({'INFO'}, f'Finished exporting {exporter.collection.name} in {elapsed_s}')
 		return {'FINISHED'}
@@ -109,7 +118,10 @@ class AnmXfbinExporter:
 		else:
 			self.inject_to_clump = False
 
-		anm_chunks_obj = self.collection.objects.get(f'{XFBIN_ANMS_OBJ} [{self.collection.name}]')
+		for obj in self.collection.objects:
+			if obj.name.startswith(XFBIN_ANMS_OBJ):
+				anm_chunks_obj = obj
+
 		anm_chunks_data = anm_chunks_obj.xfbin_anm_chunks_data
 
 		for anm_chunk in anm_chunks_data.anm_chunks:
@@ -119,9 +131,11 @@ class AnmXfbinExporter:
 
 
 			anm_chunk_name = anm_chunk.name.split(' (')[0] if ' (' in anm_chunk.name else anm_chunk.name # Remove suffix if it exists
+   
+			anm_clumps = self.make_anm_armatures(anm_chunk)
 
-			for clump in self.make_anm_armatures(anm_chunk):
-				page.struct_infos.extend(clump.nucc_struct_infos)
+			for clump in anm_clumps:
+				page.struct_infos.extend(clump.nucc_struct_infos.get_armature_info())
 				page.struct_references.extend(clump.nucc_struct_references)
 
 	
@@ -138,7 +152,9 @@ class AnmXfbinExporter:
 			
 			if anm_chunk.lightdircs:
 				for light_prop in anm_chunk.lightdircs:
-					lightdirc = bpy.data.objects[light_prop.name]
+					lightdirc = bpy.data.objects.get(light_prop.name)
+					if not lightdirc:
+						continue
 					lightdirc_name = light_prop.name.split(' (')[0] if ' (' in light_prop.name else light_prop.name
 
 					nucc_lightdirc = NuccLightDirc()
@@ -155,7 +171,9 @@ class AnmXfbinExporter:
 			
 			if anm_chunk.lightpoints:
 				for light_prop in anm_chunk.lightpoints:
-					lightpoint = bpy.data.objects[light_prop.name]
+					lightpoint = bpy.data.objects.get(light_prop.name)
+					if not lightpoint:
+						continue
 					lightpoint_name = light_prop.name.split(' (')[0] if ' (' in light_prop.name else light_prop.name
 
 					nucc_lightpoint = NuccLightPoint()
@@ -178,7 +196,9 @@ class AnmXfbinExporter:
 			
 			if anm_chunk.ambients:
 				for light_prop in anm_chunk.ambients:
-					ambient_obj = bpy.data.objects[light_prop.name]
+					ambient_obj = bpy.data.objects.get(light_prop.name)
+					if not ambient_obj:
+						continue
 					ambient_name = light_prop.name.split(' (')[0] if ' (' in light_prop.name else light_prop.name
 
 					nucc_ambient = NuccAmbient()
@@ -190,7 +210,7 @@ class AnmXfbinExporter:
 					page.structs.append(nucc_ambient)
 			
 			
-			nucc_anm: NuccAnm = self.make_anm(anm_chunk, page.struct_infos)
+			nucc_anm: NuccAnm = self.make_anm(anm_chunk, anm_clumps, page.struct_infos)
 			page.structs.append(nucc_anm)
 			
 
@@ -222,11 +242,12 @@ class AnmXfbinExporter:
 			arm_obj: Armature = bpy.data.objects.get(clump_props.name)
 
 			if not arm_obj:
+				#self.report({"WARNING"}, f"Armature {clump_props.name} not found, skipping...")
 				continue
    
 			if arm_obj.animation_data:
 				if index == 0:
-					action = bpy.data.actions.get(f'{anm_chunk.name} ({clump_props.name})')
+					action = bpy.data.actions.get(f'{anm_chunk.name}')
 				else:
 					action = arm_obj.animation_data.action
 
@@ -237,11 +258,10 @@ class AnmXfbinExporter:
 		return anm_armatures
 
 
-	def make_anm(self, anm_chunk: XfbinAnmChunkPropertyGroup, struct_infos: List[NuccStructInfo]) -> NuccAnm:
+	def make_anm(self, anm_chunk: XfbinAnmChunkPropertyGroup, anm_armatures, struct_infos: List[NuccStructInfo]) -> NuccAnm:
 		"""
 		Return NuccAnm object from AnmProp object.
 		"""
-		anm_armatures = self.make_anm_armatures(anm_chunk)
 
 		anm = NuccAnm()
 
@@ -265,25 +285,33 @@ class AnmXfbinExporter:
 
 		if anm_chunk.cameras:
 			for index, camera_chunk in enumerate(anm_chunk.cameras):
-				camera = bpy.data.objects[camera_chunk.name]
+				camera = bpy.data.objects.get(camera_chunk.name)
+				if not camera:
+					continue
 				anm.entries.extend(self.make_camera_entries(camera, index))
 				anm.other_entries_indices.append(len(struct_infos) + index)
 
 		if anm_chunk.lightdircs:
 			for index, light_prop in enumerate(anm_chunk.lightdircs):
-				lightdirc = bpy.data.objects[light_prop.name]
+				lightdirc = bpy.data.objects.get(light_prop.name)
+				if not lightdirc:
+					continue
 				anm.entries.extend(self.make_lightdirc_entries(lightdirc, index + len(anm_chunk.cameras)))
 				anm.other_entries_indices.append(len(struct_infos) + index + len(anm_chunk.cameras))
 		
 		if anm_chunk.lightpoints:
 			for index, light_prop in enumerate(anm_chunk.lightpoints):
-				lightpoint = bpy.data.objects[light_prop.name]
+				lightpoint = bpy.data.objects.get(light_prop.name)
+				if not lightpoint:
+					continue
 				anm.entries.extend(self.make_lightpoint_entries(lightpoint, index + len(anm_chunk.cameras) + len(anm_chunk.lightdircs)))
 				anm.other_entries_indices.append(len(struct_infos) + index + len(anm_chunk.cameras) + len(anm_chunk.lightdircs))
 
 		if anm_chunk.ambients:
 			for index, light_prop in enumerate(anm_chunk.ambients):
-				ambient = bpy.data.objects[light_prop.name]
+				ambient = bpy.data.objects.get(light_prop.name)
+				if not ambient:
+					continue
 				anm.entries.extend(self.make_ambient_entries(ambient, index + len(anm_chunk.cameras) + len(anm_chunk.lightdircs) + len(anm_chunk.lightpoints)))
 				anm.other_entries_indices.append(len(struct_infos) + index + len(anm_chunk.cameras) + len(anm_chunk.lightdircs) + len(anm_chunk.lightpoints))
 
@@ -300,13 +328,13 @@ class AnmXfbinExporter:
 				clump.clump_index = struct_references.index(NuccStructReference(anm_armature.models[0], NuccStructInfo(anm_armature.name, "nuccChunkClump", anm_armature.chunk_path)))
 					
 			else:
-				clump.clump_index = struct_references.index(NuccStructReference(anm_armature.bones[0], NuccStructInfo(anm_armature.name, "nuccChunkClump", anm_armature.chunk_path)))
+				clump.clump_index = struct_references.index(NuccStructReference(anm_armature.bones[0].name, NuccStructInfo(anm_armature.name, "nuccChunkClump", anm_armature.chunk_path)))
 					
 			bone_material_indices: List[int] = list()
 
 			
 
-			bone_indices: List[int] = [struct_references.index(NuccStructReference(bone, NuccStructInfo(bone, "nuccChunkCoord", anm_armature.chunk_path))) for bone in anm_armature.bones]
+			bone_indices: List[int] = [struct_references.index(NuccStructReference(bone.name, NuccStructInfo(bone.name, "nuccChunkCoord", anm_armature.chunk_path))) for bone in anm_armature.bones]
 			mat_indices: List[int] = [struct_references.index(NuccStructReference(mat, NuccStructInfo(mat, "nuccChunkMaterial", anm_armature.chunk_path))) for mat in anm_armature.materials]
 			model_indices: List[int] = [struct_references.index(NuccStructReference(model, NuccStructInfo(model, "nuccChunkModel", anm_armature.chunk_path))) for model in anm_armature.models]
 
@@ -331,24 +359,25 @@ class AnmXfbinExporter:
 		for armature_index, anm_armature in enumerate(anm_armatures):
 			armature_obj = anm_armature.armature
 
-			child_bones: List[Bone] = [bone for bone in anm_armature.armature.data.bones if bone.parent]
+			for bone in anm_armature.armature.data.bones:
+				if bone.parent:
+					parent = AnmCoord(armature_index, anm_armature.bones.index(bone.parent))
+					child = AnmCoord(armature_index, anm_armature.bones.index(bone))
 
-			for bone in child_bones:
-				parent = AnmCoord(armature_index, anm_armature.bones.index(bone.parent.name))
-				child = AnmCoord(armature_index, anm_armature.bones.index(bone.name))
-
-				coord_parents.append(CoordParent(parent, child))
+					coord_parents.append(CoordParent(parent, child))
 
 				
 			# Handle case where bone has constraints
-			for bone in armature_obj.data.bones:
+			'''for bone in armature_obj.data.bones:
 				if ("Copy Transforms" in anm_armatures[armature_index].armature.pose.bones[bone.name].constraints):
-					parent_armature = next((arm for arm in anm_armatures if arm.armature == armature_obj.pose.bones[bone.name].constraints["Copy Transforms"].target), None)
-					parent_clump_index = anm_armatures.index(parent_armature)
-					parent = AnmCoord(parent_clump_index, parent_armature.bones.index(armature_obj.pose.bones[bone.name].constraints["Copy Transforms"].subtarget))
-					child = AnmCoord(armature_index, anm_armature.bones.index(bone.name))
+					target_object = anm_armatures[armature_index].armature.pose.bones[bone.name].constraints["Copy Transforms"].target
+					parent_armature = next((arm for arm in anm_armatures if arm.armature == target_object), None)
+					if parent_armature:
+						parent_clump_index = anm_armatures.index(parent_armature)
+						parent = AnmCoord(parent_clump_index, parent_armature.bones.index(armature_obj.pose.bones[bone.name].constraints["Copy Transforms"].subtarget))
+						child = AnmCoord(armature_index, anm_armature.bones.index(bone.name))
 
-					coord_parents.append(CoordParent(parent, child))
+						coord_parents.append(CoordParent(parent, child))'''
 			
 
 		return coord_parents
@@ -358,23 +387,26 @@ class AnmXfbinExporter:
 		entries: List[AnmEntry] = list()
 
 		# Filter the groups that are in anm_armature.anm_bones
-		bone_names = {bone.name for bone in anm_armature.anm_bones}
+		bone_names = [bone.name for bone in anm_armature.armature.data.bones]
+		#print([group.name for group in anm_armature.action.groups.values()])
 		groups = [group for group in anm_armature.action.groups.values() if group.name in bone_names]
 
 		for group in groups:
+			if not group.channels:
+				continue
 			# Initialize curve lists
 			location_curves = [None] * 3
 			rotation_curves = [None] * 3  # Euler rotations
 			quaternion_curves = [None] * 4
 			scale_curves = [None] * 3
-			toggle_curves = [None]
+			opacity_curves = [None]
 
 			channel_dict = {
 				'location': location_curves,
 				'rotation_euler': rotation_curves,
 				'rotation_quaternion': quaternion_curves,
 				'scale': scale_curves,
-				'toggled': toggle_curves,
+				'opacity': opacity_curves,
 			}
 
 			# Assign curves to their respective lists
@@ -393,18 +425,42 @@ class AnmXfbinExporter:
 			entry = AnmEntry()
 			entry.coord = AnmCoord(clump_index, coord_index)
 			entry.entry_format = EntryFormat.Coord
+   
+			entry_bone = anm_armature.armature.data.bones[group.name]
+			bone_matrix = get_edit_matrix(anm_armature.armature, entry_bone)
+   
+			loc, rot, scale = bone_matrix.decompose()
 			
 
 			# ------------------- location -------------------
 			location_keyframes = defaultdict(list)
+			last_value = [0, 0, 0]
+
+			loc_frames = set()
+			for curve in location_curves:
+				if curve:
+					loc_frames.update([kp.co[0] for kp in curve.keyframe_points])
+
+			for frame in sorted(loc_frames):
+				frame_values = last_value.copy()
+
+				for curve in location_curves:
+					if curve:
+						curve_index = curve.array_index
+						keyframe = next((kp for kp in curve.keyframe_points if kp.co[0] == frame), None)
+						if keyframe:
+							frame_values[curve_index] = curve.evaluate(keyframe.co[0])
+
+				last_value = frame_values.copy()
+				location_keyframes[int(frame)] = frame_values
 			
-			for i in range(3):  # Iterate over the three location axes
+			'''for i in range(3):  # Iterate over the three location axes
 				curve = location_curves[i]
 				if curve:
 					for kp in curve.keyframe_points:
 						frame = int(kp.co[0])
 						value = curve.evaluate(kp.co[0])
-						location_keyframes[frame].append(value)
+						location_keyframes[frame].append(value)'''
 
 			frame_count = len(location_keyframes)
 			is_multiple_keyframes = frame_count > 1
@@ -416,7 +472,7 @@ class AnmXfbinExporter:
 
 			location_track = Track()
 			location_track.keys = [
-				convert_bone_value(anm_armature, group.name, 'location', location_track_header, value, frame)
+				convert_bone_value(loc, rot, scale, 'location', location_track_header, value, frame)
 				for frame, value in location_keyframes.items()
 			]
 
@@ -432,14 +488,39 @@ class AnmXfbinExporter:
 			rotation_track = Track()
 
 			rotation_keyframes = defaultdict(list)
-
+   
 			if any(quaternion_curves):
+			
+				# Find all unique keyframe frames across all quaternion curves
+				all_frames = set()
 				for curve in quaternion_curves:
 					if curve:
-						keyframes = [kp.co[0] for kp in curve.keyframe_points]
-						values = [curve.evaluate(kp.co[0]) for kp in curve.keyframe_points]
-						for frame, value in zip(keyframes, values):
-							rotation_keyframes[int(frame)].append(value)
+						all_frames.update([kp.co[0] for kp in curve.keyframe_points])
+
+				# Sort frames to process in chronological order
+				sorted_frames = sorted(all_frames)
+
+				# Last known quaternion values (initialize with default quaternion [1, 0, 0, 0])
+				last_quat = [1.0, 0.0, 0.0, 0.0]
+
+				# Iterate over frames
+				for frame in sorted_frames:
+					#frame_values = last_quat.copy()  # Start with last known values
+
+					for curve in quaternion_curves:
+						if curve:
+							curve_index = curve.array_index
+							# Check if this curve has a keyframe at the current frame
+							keyframe = next((kp for kp in curve.keyframe_points if kp.co[0] == frame), None)
+							if keyframe:
+								last_quat[curve_index] = curve.evaluate(frame)
+
+					# Update last known values
+					#last_quat = frame_values.copy()
+
+					# Store the complete quaternion for this frame
+					rotation_keyframes[int(frame)] = last_quat.copy()
+
 
 				frame_count = len(rotation_keyframes)
 				rotation_track_header.track_index = 1
@@ -447,7 +528,7 @@ class AnmXfbinExporter:
 				rotation_track_header.frame_count = frame_count + 1
 
 				rotation_track.keys = [
-					convert_bone_value(anm_armature, group.name, 'rotation_quaternion', rotation_track_header, value, frame)
+					convert_bone_value(loc, rot, scale, 'rotation_quaternion', rotation_track_header, value, frame)
 					for frame, value in rotation_keyframes.items()
 				]
 
@@ -459,13 +540,26 @@ class AnmXfbinExporter:
 
 			elif any(rotation_curves):
 				rot_updated_frames = set()
+
+				all_frames = set()
 				for curve in rotation_curves:
 					if curve:
-						keyframes = [kp.co[0] for kp in curve.keyframe_points]
-						rot_updated_frames.update(keyframes)
-						values = [curve.evaluate(kp.co[0]) for kp in curve.keyframe_points]
-						for frame, value in zip(keyframes, values):
-							rotation_keyframes[int(frame)].append(value)
+						all_frames.update([kp.co[0] for kp in curve.keyframe_points])
+
+				last_euler = [0, 0, 0]
+
+				for frame in sorted(all_frames):
+					frame_values = last_euler.copy()
+
+					for curve in rotation_curves:
+						if curve:
+							curve_index = curve.array_index
+							keyframe = next((kp for kp in curve.keyframe_points if kp.co[0] == frame), None)
+							if keyframe:
+								frame_values[curve_index] = curve.evaluate(keyframe.co[0])
+
+					last_euler = frame_values.copy()
+					rotation_keyframes[int(frame)] = frame_values
 
 				frame_count = len(rotation_keyframes)
 				rotation_track_header.track_index = 1
@@ -473,7 +567,7 @@ class AnmXfbinExporter:
 				rotation_track_header.frame_count = frame_count
 
 				rotation_track.keys = [
-					convert_bone_value(anm_armature, group.name, 'rotation_euler', rotation_track_header, value, frame)
+					convert_bone_value(loc, rot, scale, 'rotation_euler', rotation_track_header, value, frame)
 					for frame, value in rotation_keyframes.items()
 				]
 
@@ -499,7 +593,7 @@ class AnmXfbinExporter:
 				scale_track_header.frame_count = frame_count + 1
 
 				scale_track.keys = [
-					convert_bone_value(anm_armature, group.name, 'scale', scale_track_header, value, frame)
+					convert_bone_value(loc, rot, scale, 'scale', scale_track_header, value, frame)
 					for frame, value in scale_keyframes.items()
 				]
 
@@ -511,7 +605,7 @@ class AnmXfbinExporter:
 				scale_track_header.frame_count = 1
 
 				scale_track.keys = [
-					convert_bone_value(anm_armature, group.name, 'scale', scale_track_header, value, frame)
+					convert_bone_value(loc, rot, scale, 'scale', scale_track_header, value, frame)
 					for frame, value in scale_keyframes.items()
 				]
 
@@ -519,37 +613,37 @@ class AnmXfbinExporter:
 			entry.track_headers.append(scale_track_header)
 
 			# ------------------- toggled -------------------
-			toggle_track_header = TrackHeader()
-			toggle_track = Track()
+			opacity_track_header = TrackHeader()
+			opacity_track = Track()
 
-			toggle_keyframes = defaultdict(list)
+			opacity_keyframes = defaultdict(list)
 
-			if any(toggle_curves):
-				if toggle_curves[0]:
-					keyframes = [kp.co[0] for kp in toggle_curves[0].keyframe_points]
+			if any(opacity_curves):
+				if opacity_curves[0]:
+					keyframes = [kp.co[0] for kp in opacity_curves[0].keyframe_points]
 
-					values = [toggle_curves[0].evaluate(kp.co[0]) for kp in toggle_curves[0].keyframe_points]
+					values = [opacity_curves[0].evaluate(kp.co[0]) for kp in opacity_curves[0].keyframe_points]
 
 					for frame, value in zip(keyframes, values):
-						toggle_keyframes[int(frame)].append(value)
+						opacity_keyframes[int(frame)].append(value)
 
-				toggle_track_header.track_index = 3
-				toggle_track_header.key_format = NuccAnmKeyFormat.FloatFixed
-				toggle_track_header.frame_count = len(toggle_keyframes) or 1
+				opacity_track_header.track_index = 3
+				opacity_track_header.key_format = NuccAnmKeyFormat.FloatLinear
+				opacity_track_header.frame_count = len(opacity_keyframes) or 1
 
-				toggle_track.keys = [
-					NuccAnmKey.Float(value[0])
-					for _, value in toggle_keyframes.items()
+				opacity_track.keys = [
+					NuccAnmKey.FloatLinear(int(frame * 100), value[0])
+					for frame, value in opacity_keyframes.items()
 				]
 			else:
-				toggle_track_header.track_index = 3
-				toggle_track_header.key_format = NuccAnmKeyFormat.FloatFixed
-				toggle_track_header.frame_count = 1
+				opacity_track_header.track_index = 3
+				opacity_track_header.key_format = NuccAnmKeyFormat.FloatFixed
+				opacity_track_header.frame_count = 1
 
-				toggle_track.keys = [NuccAnmKey.Float(1.0)]
+				opacity_track.keys = [NuccAnmKey.Float(1.0)]
 
-			entry.tracks.append(toggle_track)
-			entry.track_headers.append(toggle_track_header)
+			entry.tracks.append(opacity_track)
+			entry.track_headers.append(opacity_track_header)
 
 			entries.append(entry)
 
@@ -696,13 +790,17 @@ class AnmXfbinExporter:
 		translations: List[Vector] = list()
 		rotations: List[Vector] = list()
 		fov: List[float] = list()
+  
+		# Last sanity check to see if camera has animation data
+		if not camera.animation_data:
+			return entries
+
+		if not camera.animation_data.action:
+			return entries
 
 
 		# Get the camera's location + rotation matrix for each frame and the FOV
 		for frame in range(context.scene.frame_start, context.scene.frame_end + 1):
-			# Last sanity check to see if camera has animation data
-			if not camera.animation_data:
-				continue
 
 			context.scene.frame_set(frame)
 

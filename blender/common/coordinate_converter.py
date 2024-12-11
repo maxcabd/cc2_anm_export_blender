@@ -43,53 +43,34 @@ def fov_from_blender(sensor_width: float, lens: float) -> float:
 
 
 
-def convert_bone_value(anm_armature: AnmArmature, bone_name: str, data_path: str,
-					   track_header: TrackHeader, values: List[float], frame: int = 0) -> NuccAnmKey:
-	armature: Armature = anm_armature.armature
-
-	has_parent: bool = any(bone_name for bone in anm_armature.armature.data.bones if bone.parent)
-
-	edit_matrix: Matrix = get_edit_matrix(armature, bone_name)
-	
+def convert_bone_value(loc, rot, scale, data_path: str, track_header: TrackHeader, values: List[float], frame: int = 0) -> NuccAnmKey:
 
 	def translate(seq: List[float]) -> Tuple[float]:
-		loc, rot, _ = edit_matrix.decompose()
-		if has_parent:
-			
-			translation = Vector(seq)
-			translation.rotate(rot)
+		translation = Vector(seq)
+		translation.rotate(rot)
 
-			return tuple(pos_m_to_cm_tuple((translation + loc)[:]))
-		else:
-			translation = Vector(seq)
-			return tuple(pos_m_to_cm_tuple(translation + loc)[:])
+		return tuple(pos_m_to_cm_tuple((loc + translation)))
 		
 	
 	def rotate_euler(seq: List[float]) -> Tuple[int, int, int]:
-		_, rot, _ = edit_matrix.decompose()
-		if has_parent:
+		#rot = edit_matrix.to_quaternion()
+		'''if has_parent:
 			rotation = rot @ Euler(seq).to_quaternion().inverted().to_euler('ZYX')
 			rotation = rot_to_blender(rotation)
 			return tuple(rot_from_blender(rotation))
-		else:
-			rotation = Euler(seq).to_quaternion().inverted().to_euler('ZYX')
-			rotation = rot_to_blender(rotation)
-			return tuple(rot_from_blender(rotation))
+		else:'''
+			#rotation = Euler(seq).to_quaternion().inverted().to_euler('ZYX')
+			#rotation = rot_to_blender(rotation)
+		return tuple(math.degrees(x) for x in seq)
 	
 
 	def rotate_quaternion(seq: List[float]) -> Tuple[int, int, int, int]:
-		_, rot, _ = edit_matrix.decompose()
-		if has_parent:
-			rotation = Quaternion(seq)
-			rotation = (rot @ rotation).inverted()
-			# Swizzle the quaternion to match the game's format to x, y, z, w
-			rotation = Quaternion((rotation.x, rotation.y, rotation.z, rotation.w))
-			return tuple(rotation)
-		else:
-			rotation = Quaternion(seq).inverted()
-			# Swizzle the quaternion to match the game's format to x, y, z, w
-			rotation = Quaternion((rotation.x, rotation.y, rotation.z, rotation.w))
-			return tuple(rotation)
+		rotation = Quaternion(seq)
+		rotation = (rot @ rotation).inverted()
+		# Swizzle the quaternion to match the game's format to x, y, z, w
+		rotation = Quaternion((rotation.x, rotation.y, rotation.z, rotation.w))
+		return tuple(rotation)
+
 	
 	match data_path, track_header.key_format:
 		case 'location', NuccAnmKeyFormat.Vector3Fixed:
@@ -100,6 +81,9 @@ def convert_bone_value(anm_armature: AnmArmature, bone_name: str, data_path: str
 		
 		case 'rotation_euler', NuccAnmKeyFormat.EulerXYZFixed:
 			return NuccAnmKey.Vec3(rotate_euler(values))
+
+		case 'rotation_euler', NuccAnmKeyFormat.EulerInterpolated:
+			return NuccAnmKey.Vec3(rotate_euler(values))
 		
 		case 'rotation_quaternion', NuccAnmKeyFormat.QuaternionLinear:
 			return NuccAnmKey.Vec4Linear(frame * 100, rotate_quaternion(values))
@@ -108,12 +92,14 @@ def convert_bone_value(anm_armature: AnmArmature, bone_name: str, data_path: str
 			return NuccAnmKey.ShortVec4(tuple([int(y * QUAT_COMPRESS) for y in rotate_quaternion(values)]))	
 		
 		case 'scale', NuccAnmKeyFormat.Vector3Linear:
-			scale = Vector([abs(seq) for seq in values])[:]
-			return NuccAnmKey.Vec3Linear(frame * 100, tuple(scale[:]))
+			new_scale = Vector(values)
+			new_scale = scale * Vector(new_scale)
+			return NuccAnmKey.Vec3Linear(frame * 100, tuple(new_scale))
 		
 		case 'scale', NuccAnmKeyFormat.Vector3Fixed:
-			scale = Vector([abs(seq) for seq in values])[:]
-			return NuccAnmKey.Vec3(tuple(scale))
+			new_scale = Vector(values)
+			new_scale = scale * Vector(new_scale)
+			return NuccAnmKey.Vec3(tuple(new_scale))
 		
 	return values
 
