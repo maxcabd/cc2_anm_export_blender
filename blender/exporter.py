@@ -19,6 +19,8 @@ from .common.coordinate_converter import *
 from cProfile import Profile
 import pstats
 
+from time import perf_counter
+
 class ExportAnmXfbin(Operator, ExportHelper):
 	"""Export current collection as XFBIN file"""
 	bl_idname = 'export_anm_scene.xfbin'
@@ -82,15 +84,14 @@ class ExportAnmXfbin(Operator, ExportHelper):
 		start_time = time.time()
 		exporter = AnmXfbinExporter(self, self.filepath, self.as_keywords(ignore=('filter_glob',)))
   
-		#profiler = Profile()
-		#profiler.enable()
+		# Profile the function
+		pr = Profile()
+		pr.enable()
 		exporter.export_collection(context)
 
-		'''profiler.disable()
-		stats = pstats.Stats(profiler)
-		stats.strip_dirs()
-		stats.sort_stats('cumulative')
-		stats.print_stats()'''
+		pr.disable()
+		pr.print_stats(sort='cumtime')
+  
 		elapsed_s = "{:.2f}s".format(time.time() - start_time)
 		self.report({'INFO'}, f'Finished exporting {exporter.collection.name} in {elapsed_s}')
 		return {'FINISHED'}
@@ -234,23 +235,18 @@ class AnmXfbinExporter:
 		"""
 		Return list of armatures that contain animation data.
 		"""
-		anm_armatures: List[AnmArmature] = list()
+		anm_armatures: List[AnmArmature] = []
 
 		for index, clump_props in enumerate(anm_chunk.anm_clumps):
-			clump_props: XfbinAnmClumpPropertyGroup
-
 			arm_obj: Armature = bpy.data.objects.get(clump_props.name)
 
-			if not arm_obj:
-				#self.report({"WARNING"}, f"Armature {clump_props.name} not found, skipping...")
+			if not arm_obj or not arm_obj.animation_data:
 				continue
-   
-			if arm_obj.animation_data:
-				if index == 0:
-					action = bpy.data.actions.get(f'{anm_chunk.name}')
-				else:
-					action = arm_obj.animation_data.action
 
+			action_name = anm_chunk.name if index == 0 else arm_obj.animation_data.action.name
+			action = bpy.data.actions.get(action_name)
+
+			if action:
 				arm_obj.animation_data_create()
 				arm_obj.animation_data.action = action
 				anm_armatures.append(AnmArmature(arm_obj))
@@ -276,9 +272,32 @@ class AnmXfbinExporter:
 
 		anm.clumps.extend(self.make_anm_clump(anm_armatures, struct_references))
 		anm.coord_parents.extend(self.make_anm_coords(anm_armatures))
+  
+		action = bpy.data.actions.get(f'{anm_chunk.name}')
+  
+		
+		fcurve_dict = {}
+  
+		for fcurve in action.fcurves:
+			# bone name : location, rotation_euler, rotation_quaternion, scale, opacity
+			if len(fcurve.data_path.split('"')) < 2:
+				continue 
+			bone_name = fcurve.data_path.split('"')[1]
+   
+			if not fcurve_dict.get(bone_name):
+				fcurve_dict[bone_name] = {
+										'location': [None] * 3,
+										'rotation_euler': [None] * 3,
+										'rotation_quaternion': [None] * 4,
+										'scale': [None] * 3,
+										'opacity': [None]}
+
+			property_name = fcurve.data_path.split('.')[-1]
+			fcurve_dict[bone_name][property_name][fcurve.array_index] = fcurve
+
 
 		for armature in anm_armatures:
-			anm.entries.extend(self.make_coord_entries(armature, struct_references, anm.clumps))
+			anm.entries.extend(self.make_coord_entries(armature, struct_references, anm.clumps, fcurve_dict))
 			if anm_chunk.export_material_animations:
 				anm.entries.extend(self.make_material_entries(armature, struct_references, anm.clumps))
 
@@ -383,271 +402,152 @@ class AnmXfbinExporter:
 		return coord_parents
 
 
-	def make_coord_entries(self, anm_armature: AnmArmature, struct_references: List[NuccStructReference], clumps: List[AnmClump]) -> List[AnmEntry]:
-		entries: List[AnmEntry] = list()
+	def make_coord_entries(self, anm_armature: AnmArmature, struct_references: List[NuccStructReference], clumps: List[AnmClump], fcurve_dict) -> List[AnmEntry]:
+		def collect_keyframes(curves, default_values, evaluate_fn):
+			"""Collect keyframes for given curves with optimized frame processing."""
+			keyframes = defaultdict(list)
+			all_frame_indices = []
 
-		# Filter the groups that are in anm_armature.anm_bones
-		bone_names = [bone.name for bone in anm_armature.armature.data.bones]
-		#print([group.name for group in anm_armature.action.groups.values()])
-		groups = [group for group in anm_armature.action.groups.values() if group.name in bone_names]
+			# Build a frame-to-keyframe map for each curve
+			curve_keyframe_maps = []
+			for curve in curves:
+				if curve:
+					frame_values = {kp.co[0]: evaluate_fn(curve, kp.co[0]) for kp in curve.keyframe_points}
+					curve_keyframe_maps.append((curve, frame_values))
+					all_frame_indices.extend(frame_values.keys())
+			
+			# Sort all frames only once
+			all_frames = sorted(set(all_frame_indices))
 
-		for group in groups:
-			if not group.channels:
+			# Initialize the last known values
+			last_values = default_values[:]
+			frame_values = last_values[:]
+
+			# Iterate over all frames and fill keyframes
+			for frame in all_frames:
+				for curve, frame_values_map in curve_keyframe_maps:
+					if frame in frame_values_map:
+						frame_values[curve.array_index] = frame_values_map[frame]
+
+				# Update last_values in place
+				last_values[:] = frame_values[:]
+				keyframes[int(frame)] = frame_values[:]
+
+			return keyframes
+
+
+		def create_track_header(track_index, key_format, frame_count):
+			"""Create a track header with common properties."""
+			header = TrackHeader()
+			header.track_index = track_index
+			header.key_format = key_format
+			header.frame_count = frame_count
+			return header
+
+		entries = []
+		armature_curves = {bone.name: fcurve_dict.get(bone.name) for bone in anm_armature.armature.data.bones}
+
+		for bone_name, curves in armature_curves.items():
+			if not curves:
 				continue
-			# Initialize curve lists
-			location_curves = [None] * 3
-			rotation_curves = [None] * 3  # Euler rotations
-			quaternion_curves = [None] * 4
-			scale_curves = [None] * 3
-			opacity_curves = [None]
-
-			channel_dict = {
-				'location': location_curves,
-				'rotation_euler': rotation_curves,
-				'rotation_quaternion': quaternion_curves,
-				'scale': scale_curves,
-				'opacity': opacity_curves,
-			}
-
-			# Assign curves to their respective lists
-			for fcurve in group.channels:
-				data_path = fcurve.data_path.split('.')[-1]
-				if data_path in channel_dict:
-					channel_dict[data_path][fcurve.array_index] = fcurve
-
-			# ------------------- entry -------------------
+			# Find clump and coordinate indices
 			clump_reference_index = struct_references.index(anm_armature.nucc_struct_references[0])
 			clump_index = next((i for i, clump in enumerate(clumps) if clump.clump_index == clump_reference_index), None)
 
-			coord_reference_index = struct_references.index(NuccStructReference(group.name, NuccStructInfo(group.name, "nuccChunkCoord", anm_armature.chunk_path)))
-			coord_index = next((i for i, coord in enumerate(clumps[clump_index].bone_material_indices) if coord == coord_reference_index), None)
+			coord_reference_index = struct_references.index(
+				NuccStructReference(bone_name, NuccStructInfo(bone_name, "nuccChunkCoord", anm_armature.chunk_path))
+			)
+			coord_index = next(
+				(i for i, coord in enumerate(clumps[clump_index].bone_material_indices) if coord == coord_reference_index), None
+			)
 
 			entry = AnmEntry()
 			entry.coord = AnmCoord(clump_index, coord_index)
 			entry.entry_format = EntryFormat.Coord
-   
-			entry_bone = anm_armature.armature.data.bones[group.name]
-			bone_matrix = get_edit_matrix(anm_armature.armature, entry_bone)
-   
-			loc, rot, scale = bone_matrix.decompose()
-			
 
-			# ------------------- location -------------------
-			location_keyframes = defaultdict(list)
-			last_value = [0, 0, 0]
+			bone = anm_armature.armature.data.bones[bone_name]
+			loc, rot, scale = get_edit_matrix(anm_armature.armature, bone).decompose()
 
-			loc_frames = set()
-			for curve in location_curves:
-				if curve:
-					loc_frames.update([kp.co[0] for kp in curve.keyframe_points])
-
-			for frame in sorted(loc_frames):
-				frame_values = last_value.copy()
-
-				for curve in location_curves:
-					if curve:
-						curve_index = curve.array_index
-						keyframe = next((kp for kp in curve.keyframe_points if kp.co[0] == frame), None)
-						if keyframe:
-							frame_values[curve_index] = curve.evaluate(keyframe.co[0])
-
-				last_value = frame_values.copy()
-				location_keyframes[int(frame)] = frame_values
-			
-			'''for i in range(3):  # Iterate over the three location axes
-				curve = location_curves[i]
-				if curve:
-					for kp in curve.keyframe_points:
-						frame = int(kp.co[0])
-						value = curve.evaluate(kp.co[0])
-						location_keyframes[frame].append(value)'''
-
-			frame_count = len(location_keyframes)
-			is_multiple_keyframes = frame_count > 1
-
-			location_track_header = TrackHeader()
-			location_track_header.track_index = 0
-			location_track_header.key_format = NuccAnmKeyFormat.Vector3Linear if is_multiple_keyframes else NuccAnmKeyFormat.Vector3Fixed
-			location_track_header.frame_count = frame_count + is_multiple_keyframes
-
+			# Create location track
+			location_keyframes = collect_keyframes(curves['location'], [0, 0, 0], lambda c, f: c.evaluate(f))
+			location_frame_count = len(location_keyframes)
+			location_is_multiple = location_frame_count > 1
+			location_header = create_track_header(
+				0, NuccAnmKeyFormat.Vector3Linear if location_is_multiple else NuccAnmKeyFormat.Vector3Fixed,
+				location_frame_count + location_is_multiple
+			)
 			location_track = Track()
 			location_track.keys = [
-				convert_bone_value(loc, rot, scale, 'location', location_track_header, value, frame)
+				convert_bone_value(loc, rot, scale, 'location', location_header, value, frame)
 				for frame, value in location_keyframes.items()
 			]
-
-			if is_multiple_keyframes:
-				null_key = NuccAnmKey.Vec3Linear(-1, location_track.keys[-1].values)
-				location_track.keys.append(null_key)
+			if location_is_multiple:
+				location_track.keys.append(NuccAnmKey.Vec3Linear(-1, location_track.keys[-1].values))
 
 			entry.tracks.append(location_track)
-			entry.track_headers.append(location_track_header)
+			entry.track_headers.append(location_header)
 
-			# ------------------- rotation quaternion -------------------
-			rotation_track_header = TrackHeader()
-			rotation_track = Track()
-
-			rotation_keyframes = defaultdict(list)
-   
-			if any(quaternion_curves):
-			
-				# Find all unique keyframe frames across all quaternion curves
-				all_frames = set()
-				for curve in quaternion_curves:
-					if curve:
-						all_frames.update([kp.co[0] for kp in curve.keyframe_points])
-
-				# Sort frames to process in chronological order
-				sorted_frames = sorted(all_frames)
-
-				# Last known quaternion values (initialize with default quaternion [1, 0, 0, 0])
-				last_quat = [1.0, 0.0, 0.0, 0.0]
-
-				# Iterate over frames
-				for frame in sorted_frames:
-					#frame_values = last_quat.copy()  # Start with last known values
-
-					for curve in quaternion_curves:
-						if curve:
-							curve_index = curve.array_index
-							# Check if this curve has a keyframe at the current frame
-							keyframe = next((kp for kp in curve.keyframe_points if kp.co[0] == frame), None)
-							if keyframe:
-								last_quat[curve_index] = curve.evaluate(frame)
-
-					# Update last known values
-					#last_quat = frame_values.copy()
-
-					# Store the complete quaternion for this frame
-					rotation_keyframes[int(frame)] = last_quat.copy()
-
-
-				frame_count = len(rotation_keyframes)
-				rotation_track_header.track_index = 1
-				rotation_track_header.key_format = NuccAnmKeyFormat.QuaternionLinear
-				rotation_track_header.frame_count = frame_count + 1
-
+			# Create rotation track
+			if any(curves['rotation_quaternion']):
+				rotation_keyframes = collect_keyframes(curves['rotation_quaternion'], [1.0, 0.0, 0.0, 0.0], lambda c, f: c.evaluate(f))
+				rotation_header = create_track_header(1, NuccAnmKeyFormat.QuaternionLinear, len(rotation_keyframes) + 1)
+				rotation_track = Track()
 				rotation_track.keys = [
-					convert_bone_value(loc, rot, scale, 'rotation_quaternion', rotation_track_header, value, frame)
+					convert_bone_value(loc, rot, scale, 'rotation_quaternion', rotation_header, value, frame)
+					for frame, value in rotation_keyframes.items()
+				]
+				rotation_track.keys.append(NuccAnmKey.Vec4Linear(-1, rotation_track.keys[-1].values))
+
+			elif any(curves['rotation_euler']):
+				rotation_keyframes = collect_keyframes(curves['rotation_euler'], [0, 0, 0], lambda c, f: c.evaluate(f))
+				rotation_header = create_track_header(1, NuccAnmKeyFormat.EulerXYZFixed, len(rotation_keyframes))
+				rotation_track = Track()
+				rotation_track.keys = [
+					convert_bone_value(loc, rot, scale, 'rotation_euler', rotation_header, value, frame)
 					for frame, value in rotation_keyframes.items()
 				]
 
-				null_key = NuccAnmKey.Vec4Linear(-1, rotation_track.keys[-1].values)
-				rotation_track.keys.append(null_key)
+			entry.tracks.append(rotation_track)
+			entry.track_headers.append(rotation_header)
 
-				entry.tracks.append(rotation_track)
-				entry.track_headers.append(rotation_track_header)
-
-			elif any(rotation_curves):
-				rot_updated_frames = set()
-
-				all_frames = set()
-				for curve in rotation_curves:
-					if curve:
-						all_frames.update([kp.co[0] for kp in curve.keyframe_points])
-
-				last_euler = [0, 0, 0]
-
-				for frame in sorted(all_frames):
-					frame_values = last_euler.copy()
-
-					for curve in rotation_curves:
-						if curve:
-							curve_index = curve.array_index
-							keyframe = next((kp for kp in curve.keyframe_points if kp.co[0] == frame), None)
-							if keyframe:
-								frame_values[curve_index] = curve.evaluate(keyframe.co[0])
-
-					last_euler = frame_values.copy()
-					rotation_keyframes[int(frame)] = frame_values
-
-				frame_count = len(rotation_keyframes)
-				rotation_track_header.track_index = 1
-				rotation_track_header.key_format = NuccAnmKeyFormat.EulerXYZFixed
-				rotation_track_header.frame_count = frame_count
-
-				rotation_track.keys = [
-					convert_bone_value(loc, rot, scale, 'rotation_euler', rotation_track_header, value, frame)
-					for frame, value in rotation_keyframes.items()
-				]
-
-				entry.tracks.append(rotation_track)
-				entry.track_headers.append(rotation_track_header)
-
-			# ------------------- scale -------------------
-			scale_track_header = TrackHeader()
+			# Create scale track
+			scale_keyframes = collect_keyframes(curves['scale'], [1, 1, 1], lambda c, f: c.evaluate(f))
+			scale_frame_count = len(scale_keyframes)
+			scale_is_multiple = scale_frame_count > 1
+			scale_header = create_track_header(
+				2, NuccAnmKeyFormat.Vector3Linear if scale_is_multiple else NuccAnmKeyFormat.Vector3Fixed,
+				scale_frame_count + scale_is_multiple
+			)
 			scale_track = Track()
-
-			scale_keyframes = defaultdict(list)
-			for curve in scale_curves:
-				if curve:
-					keyframes = [kp.co[0] for kp in curve.keyframe_points]
-					values = [curve.evaluate(kp.co[0]) for kp in curve.keyframe_points]
-					for frame, value in zip(keyframes, values):
-						scale_keyframes[int(frame)].append(value)
-
-			frame_count = len(scale_keyframes)
-			if frame_count > 1:
-				scale_track_header.track_index = 2
-				scale_track_header.key_format = NuccAnmKeyFormat.Vector3Linear
-				scale_track_header.frame_count = frame_count + 1
-
-				scale_track.keys = [
-					convert_bone_value(loc, rot, scale, 'scale', scale_track_header, value, frame)
-					for frame, value in scale_keyframes.items()
-				]
-
-				null_key = NuccAnmKey.Vec3Linear(-1, scale_track.keys[-1].values)
-				scale_track.keys.append(null_key)
-			else:
-				scale_track_header.track_index = 2
-				scale_track_header.key_format = NuccAnmKeyFormat.Vector3Fixed
-				scale_track_header.frame_count = 1
-
-				scale_track.keys = [
-					convert_bone_value(loc, rot, scale, 'scale', scale_track_header, value, frame)
-					for frame, value in scale_keyframes.items()
-				]
+			scale_track.keys = [
+				convert_bone_value(loc, rot, scale, 'scale', scale_header, value, frame)
+				for frame, value in scale_keyframes.items()
+			]
+			if scale_is_multiple:
+				scale_track.keys.append(NuccAnmKey.Vec3Linear(-1, scale_track.keys[-1].values))
 
 			entry.tracks.append(scale_track)
-			entry.track_headers.append(scale_track_header)
+			entry.track_headers.append(scale_header)
 
-			# ------------------- toggled -------------------
-			opacity_track_header = TrackHeader()
+			# Create opacity track
+			opacity_keyframes = collect_keyframes(curves['opacity'], [1.0], lambda c, f: c.evaluate(f)) if any(curves['opacity']) else {}
+			opacity_header = create_track_header(
+				3, NuccAnmKeyFormat.FloatLinear if opacity_keyframes else NuccAnmKeyFormat.FloatFixed,
+				len(opacity_keyframes) or 1
+			)
 			opacity_track = Track()
-
-			opacity_keyframes = defaultdict(list)
-
-			if any(opacity_curves):
-				if opacity_curves[0]:
-					keyframes = [kp.co[0] for kp in opacity_curves[0].keyframe_points]
-
-					values = [opacity_curves[0].evaluate(kp.co[0]) for kp in opacity_curves[0].keyframe_points]
-
-					for frame, value in zip(keyframes, values):
-						opacity_keyframes[int(frame)].append(value)
-
-				opacity_track_header.track_index = 3
-				opacity_track_header.key_format = NuccAnmKeyFormat.FloatLinear
-				opacity_track_header.frame_count = len(opacity_keyframes) or 1
-
-				opacity_track.keys = [
-					NuccAnmKey.FloatLinear(int(frame * 100), value[0])
-					for frame, value in opacity_keyframes.items()
-				]
-			else:
-				opacity_track_header.track_index = 3
-				opacity_track_header.key_format = NuccAnmKeyFormat.FloatFixed
-				opacity_track_header.frame_count = 1
-
-				opacity_track.keys = [NuccAnmKey.Float(1.0)]
+			opacity_track.keys = [
+				NuccAnmKey.FloatLinear(int(frame * 100), value[0])
+				for frame, value in opacity_keyframes.items()
+			] if opacity_keyframes else [NuccAnmKey.Float(1.0)]
 
 			entry.tracks.append(opacity_track)
-			entry.track_headers.append(opacity_track_header)
+			entry.track_headers.append(opacity_header)
 
 			entries.append(entry)
 
 		return entries
+
 	
 
 	def make_material_entries(self, anm_armature: AnmArmature, struct_references: List[NuccStructReference], clumps: List[AnmClump]) -> List[AnmEntry]:
@@ -782,103 +682,120 @@ class AnmXfbinExporter:
 		return entries
 
 
+	from typing import List, Dict, Set
+
 	def make_camera_entries(self, camera: bpy.types.Camera, other_index: int) -> List[AnmEntry]:
-		context = bpy.context
+		entries: List[AnmEntry] = []
+		
+		if not camera.animation_data or not camera.animation_data.action:
+			return entries
 
-		entries: List[AnmEntry] = list()
-
-		translations: List[Vector] = list()
-		rotations: List[Vector] = list()
-		fov: List[float] = list()
+		sensor_width = camera.data.sensor_width
   
-		# Last sanity check to see if camera has animation data
-		if not camera.animation_data:
-			return entries
+		cam_fcurves = {
+			"location": [{}, {}, {}],
+			"rotation_quaternion": [{}, {}, {}, {}],
+			"rotation_euler": [{}, {}, {}],
+			"lens": {}
+		}
+		
+		location_frames: Set[int] = set()
+		quat_frames: Set[int] = set()
+		euler_frames: Set[int] = set()
+		fov_frames: Set[int] = set()
 
-		if not camera.animation_data.action:
-			return entries
+		fcurve_mapping = {
+			"location": (cam_fcurves["location"], location_frames),
+			"rotation_quaternion": (cam_fcurves["rotation_quaternion"], quat_frames),
+			"rotation_euler": (cam_fcurves["rotation_euler"], euler_frames),
+			"lens": (cam_fcurves["lens"], fov_frames)
+		}
 
+		for fcurve in camera.animation_data.action.fcurves:
+			for path, (target, frame_set) in fcurve_mapping.items():
+				if fcurve.data_path.endswith(path):
+					for kp in fcurve.keyframe_points:
+						if isinstance(target, list):  # For multi-axis data
+							target[fcurve.array_index][int(kp.co[0])] = kp.co[1]
+						else:  # For single-axis data like lens
+							target[int(kp.co[0])] = kp.co[1]
+						frame_set.add(int(kp.co[0]))
+					break
 
-		# Get the camera's location + rotation matrix for each frame and the FOV
-		for frame in range(context.scene.frame_start, context.scene.frame_end + 1):
+		def create_tracks(frame_values: Dict[int, List[float]], data_path, key_format, track_index, null_key_type):
+			track_header = TrackHeader(track_index=track_index, key_format=key_format)
+			track = Track()
+			last_values = [0] * len(frame_values[next(iter(frame_values))])
 
-			context.scene.frame_set(frame)
+			for frame, values in sorted(frame_values.items()):
+				for i, val in enumerate(values):
+					if val is not None:
+						last_values[i] = val
+				converted_value = convert_object_value(sensor_width, data_path, last_values, frame)
+				track.keys.append(converted_value)
 
-			translations.append(camera.matrix_world.to_translation().copy())
-			rotations.append( camera.matrix_world.to_quaternion().copy())
-			fov.append(fov_from_blender(camera.data.sensor_width, camera.data.lens))
+			if null_key_type == "Vec3Linear":
+				null_key = NuccAnmKey.Vec3Linear(-1, track.keys[-1].values)
+			elif null_key_type == "Vec4Linear":
+				null_key = NuccAnmKey.Vec4Linear(-1, track.keys[-1].values)
+			elif null_key_type == "FloatLinear":
+				null_key = NuccAnmKey.FloatLinear(-1, track.keys[-1].values)
+			else:
+				raise ValueError("Unsupported null key type")
 
+			track.keys.append(null_key)
+			track_header.frame_count = len(track.keys)
+			return track, track_header
 
-		# ------------------- entry -------------------
+		translations = {
+			frame: [
+				cam_fcurves["location"][i].get(frame, None) for i in range(3)
+			] for frame in location_frames
+		}
+
+		quaternions = {
+			frame: [
+				cam_fcurves["rotation_quaternion"][i].get(frame, None) for i in range(4)
+			] for frame in quat_frames
+		}
+  
+		eulers = {
+			frame: [
+				cam_fcurves["rotation_euler"][i].get(frame, None) for i in range(3)
+			] for frame in euler_frames
+		}
+
+		fov = {
+			frame: [value] for frame, value in cam_fcurves["lens"].items()
+		}
+
 		entry = AnmEntry()
 		entry.coord = AnmCoord(-1, other_index)
 		entry.entry_format = EntryFormat.Camera
 
-		
-		# ------------------- location -------------------
-		location_track_header = TrackHeader()
-		location_track = Track()
+		if len(location_frames) > 1:
+			track, header = create_tracks(translations, "location", NuccAnmKeyFormat.Vector3Linear, 0, "Vec3Linear")
+			entry.tracks.append(track)
+			entry.track_headers.append(header)
 
-		for frame, value in enumerate(translations):
-			if len(translations) > 1:
-				location_track_header.track_index = 0
-				location_track_header.key_format = NuccAnmKeyFormat.Vector3Linear
-				location_track_header.frame_count = len(translations) + 1
+		if len(quat_frames) > 1:
+			track, header = create_tracks(quaternions, "rotation_quaternion", NuccAnmKeyFormat.QuaternionLinear, 1, "Vec4Linear")
+			entry.tracks.append(track)
+			entry.track_headers.append(header)
+   
+		if len(euler_frames) > 1:
+			track, header = create_tracks(eulers, "rotation_euler", NuccAnmKeyFormat.QuaternionLinear, 1, "Vec4Linear")
+			entry.tracks.append(track)
+			entry.track_headers.append(header)
 
-				converted_value: NuccAnmKey = convert_object_value("location", value[:], frame)
-
-				location_track.keys.append(converted_value)
-
-			
-		
-		null_key: NuccAnmKey = NuccAnmKey.Vec3Linear(-1, location_track.keys[-1].values)
-		location_track.keys.append(null_key)
-
-		entry.tracks.append(location_track)
-		entry.track_headers.append(location_track_header)
-
-		# ------------------- rotation quaternion -------------------
-		rotation_track_header = TrackHeader()
-		rotation_track = Track()
-
-		for frame, value in enumerate(rotations):
-			if len(rotations) > 1:
-				rotation_track_header.track_index = 1
-				rotation_track_header.key_format = NuccAnmKeyFormat.QuaternionShortTable
-				rotation_track_header.frame_count = len(rotations)
-
-				converted_value: NuccAnmKey = convert_object_value("rotation_quaternion", value[:])
-
-				rotation_track.keys.append(converted_value)
-		
-	
-		entry.tracks.append(rotation_track)
-		entry.track_headers.append(rotation_track_header)
-
-		# ------------------- FOV -------------------
-		fov_track_header = TrackHeader()
-		fov_track = Track()
-
-		for frame, value in enumerate(fov):
-			if len(fov) > 1:
-				fov_track_header.track_index = 2
-				fov_track_header.key_format = NuccAnmKeyFormat.FloatLinear
-				fov_track_header.frame_count = len(fov) + 1
-
-				converted_value: NuccAnmKey = convert_object_value("fov", [value], frame)
-
-				fov_track.keys.append(converted_value)
-		
-		null_key = NuccAnmKey.FloatLinear(-1, fov_track.keys[-1].values)
-		fov_track.keys.append(null_key)
-
-		entry.tracks.append(fov_track)
-		entry.track_headers.append(fov_track_header)
+		if len(fov_frames) > 1:
+			track, header = create_tracks(fov, "fov", NuccAnmKeyFormat.FloatLinear, 2, "FloatLinear")
+			entry.tracks.append(track)
+			entry.track_headers.append(header)
 
 		entries.append(entry)
-
-
 		return entries
+
 	
 
 	def make_lightdirc_entries(self, lightdirc: bpy.types.Light, other_index: int) -> List[AnmEntry]:

@@ -104,32 +104,42 @@ def convert_bone_value(loc, rot, scale, data_path: str, track_header: TrackHeade
 	return values
 
 
-def convert_object_value(data_path: str, values: List[float], frame: int = 0) -> NuccAnmKey:
+def convert_object_value(sensor_width, data_path: str, values: List[float], frame: int = 0) -> NuccAnmKey:
 	"""
 	Used for converting objects that are not bones, such as cameras and lights.
 	
 	"""
 	def translate(seq: List[float]) -> Tuple[float]:
-		return tuple(pos_m_to_cm_tuple(seq))
+		loc = tuple(s * 100 for s in seq)
+		return loc
 	
 	def rotate_quaternion(seq: List[float]) -> Tuple[int, int, int, int]:
-		rotation = Quaternion(seq)
+		rotation = Quaternion(seq).inverted()
 
 		# Swizzle the quaternion to match the game's format to x, y, z, w
-		rotation = Quaternion((-rotation.x, -rotation.y, -rotation.z, rotation.w))
-		rotation = tuple([int(y * QUAT_COMPRESS) for y in rotation])
+		rotation = Quaternion((rotation.x, rotation.y, rotation.z, rotation.w))
 		return tuple(rotation)
 	
+	def rotate_euler(seq: List[float]) -> Tuple[int, int, int]:
+		rotation = Euler(seq).to_quaternion().inverted()
+		rotation = Quaternion((rotation.x, rotation.y, rotation.z, rotation.w))
+		return tuple(rotation)
+
+	def to_fov(sensor_width: float, lens: float) -> float:
+		return 2 * math.atan((0.5 * sensor_width) / lens) * 180 / math.pi
 
 	match data_path:
 		case 'location':
-			return NuccAnmKey.Vec3Linear(frame * 100, translate(values))
+			return NuccAnmKey.Vec3Linear(int(frame) * 100, translate(values))
 		
 		case 'rotation_quaternion':
-			return NuccAnmKey.ShortVec4(rotate_quaternion(values))
+			return NuccAnmKey.Vec4Linear(int(frame) * 100, rotate_quaternion(values))
+
+		case 'rotation_euler':
+			return NuccAnmKey.Vec4Linear(int(frame) * 100, rotate_euler(values))
 		
 		case 'fov':
-			return NuccAnmKey.FloatLinear(frame * 100, values[0])
+			return NuccAnmKey.FloatLinear(int(frame) * 100, to_fov(sensor_width, values[0]))
 		
 		case 'color':
 			color = [int(x * 255) for x in values]
