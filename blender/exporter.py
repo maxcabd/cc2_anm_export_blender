@@ -159,14 +159,12 @@ class AnmXfbinExporter:
 					lightdirc_name = light_prop.name.split(' (')[0] if ' (' in light_prop.name else light_prop.name
 
 					nucc_lightdirc = NuccLightDirc()
-					nucc_lightdirc.s
 					nucc_lightdirc.struct_info = NuccStructInfo(lightdirc_name, "nuccChunkLightDirc", light_prop.path)
 
 					nucc_lightdirc.color = lightdirc.data.color
 					nucc_lightdirc.energy = lightdirc.data.energy
-
-					converted_value: List[int] = convert_object_value("rotation_quaternion", lightdirc.matrix_world.to_quaternion().copy()[:]).values
-					nucc_lightdirc.rotation = list(map(lambda x: x / QUAT_COMPRESS, converted_value))
+					light_default_rot = lightdirc.matrix_world.to_quaternion().inverted()
+					nucc_lightdirc.rotation = [light_default_rot.x, light_default_rot.y, light_default_rot.z, light_default_rot.w]
 
 					page.structs.append(nucc_lightdirc)
 			
@@ -275,11 +273,9 @@ class AnmXfbinExporter:
   
 		action = bpy.data.actions.get(f'{anm_chunk.name}')
   
-		
 		fcurve_dict = {}
   
 		for fcurve in action.fcurves:
-			# bone name : location, rotation_euler, rotation_quaternion, scale, opacity
 			if len(fcurve.data_path.split('"')) < 2:
 				continue 
 			bone_name = fcurve.data_path.split('"')[1]
@@ -293,9 +289,10 @@ class AnmXfbinExporter:
 										'opacity': [None]}
 
 			property_name = fcurve.data_path.split('.')[-1]
-			fcurve_dict[bone_name][property_name][fcurve.array_index] = fcurve
+			if fcurve_dict[bone_name].get(property_name):
+				fcurve_dict[bone_name][property_name][fcurve.array_index] = fcurve
 
-
+					
 		for armature in anm_armatures:
 			anm.entries.extend(self.make_coord_entries(armature, struct_references, anm.clumps, fcurve_dict))
 			if anm_chunk.export_material_animations:
@@ -447,6 +444,8 @@ class AnmXfbinExporter:
 		entries = []
 		armature_curves = {bone.name: fcurve_dict.get(bone.name) for bone in anm_armature.armature.data.bones}
 
+		#bone_indices = {bone.name: i for i, bone in enumerate(anm_armature.bones)}
+
 		for bone_name, curves in armature_curves.items():
 			if not curves:
 				continue
@@ -497,6 +496,8 @@ class AnmXfbinExporter:
 					for frame, value in rotation_keyframes.items()
 				]
 				rotation_track.keys.append(NuccAnmKey.Vec4Linear(-1, rotation_track.keys[-1].values))
+				entry.tracks.append(rotation_track)
+				entry.track_headers.append(rotation_header)
 
 			elif any(curves['rotation_euler']):
 				rotation_keyframes = collect_keyframes(curves['rotation_euler'], [0, 0, 0], lambda c, f: c.evaluate(f))
@@ -507,48 +508,52 @@ class AnmXfbinExporter:
 					for frame, value in rotation_keyframes.items()
 				]
 
-			entry.tracks.append(rotation_track)
-			entry.track_headers.append(rotation_header)
+				entry.tracks.append(rotation_track)
+				entry.track_headers.append(rotation_header)
 
 			# Create scale track
-			scale_keyframes = collect_keyframes(curves['scale'], [1, 1, 1], lambda c, f: c.evaluate(f))
-			scale_frame_count = len(scale_keyframes)
-			scale_is_multiple = scale_frame_count > 1
-			scale_header = create_track_header(
-				2, NuccAnmKeyFormat.Vector3Linear if scale_is_multiple else NuccAnmKeyFormat.Vector3Fixed,
-				scale_frame_count + scale_is_multiple
-			)
-			scale_track = Track()
-			scale_track.keys = [
-				convert_bone_value(loc, rot, scale, 'scale', scale_header, value, frame)
-				for frame, value in scale_keyframes.items()
-			]
-			if scale_is_multiple:
-				scale_track.keys.append(NuccAnmKey.Vec3Linear(-1, scale_track.keys[-1].values))
+			if any(curves['scale']):
+				scale_keyframes = collect_keyframes(curves['scale'], [1, 1, 1], lambda c, f: c.evaluate(f))
+				scale_frame_count = len(scale_keyframes)
+				scale_is_multiple = scale_frame_count > 1
+				scale_header = create_track_header(
+					2, NuccAnmKeyFormat.Vector3Linear if scale_is_multiple else NuccAnmKeyFormat.Vector3Fixed,
+					scale_frame_count + scale_is_multiple
+				)
+				scale_track = Track()
+				scale_track.keys = [
+					convert_bone_value(loc, rot, scale, 'scale', scale_header, value, frame)
+					for frame, value in scale_keyframes.items()
+				]
+				if scale_is_multiple:
+					scale_track.keys.append(NuccAnmKey.Vec3Linear(-1, scale_track.keys[-1].values))
 
-			entry.tracks.append(scale_track)
-			entry.track_headers.append(scale_header)
+				entry.tracks.append(scale_track)
+				entry.track_headers.append(scale_header)
 
+			
 			# Create opacity track
-			opacity_keyframes = collect_keyframes(curves['opacity'], [1.0], lambda c, f: c.evaluate(f)) if any(curves['opacity']) else {}
-			opacity_header = create_track_header(
-				3, NuccAnmKeyFormat.FloatLinear if opacity_keyframes else NuccAnmKeyFormat.FloatFixed,
-				len(opacity_keyframes) or 1
-			)
 			opacity_track = Track()
-			opacity_track.keys = [
-				NuccAnmKey.FloatLinear(int(frame * 100), value[0])
-				for frame, value in opacity_keyframes.items()
-			] if opacity_keyframes else [NuccAnmKey.Float(1.0)]
+			if curves['opacity'][0]:
+				curve = curves['opacity'][0]
+				opacity_track.keys = [NuccAnmKey.FloatLinear(int(kp.co[0] * 100), kp.co[1]) for kp in curve.keyframe_points] 
+				opacity_header = create_track_header(3, NuccAnmKeyFormat.FloatLinear, len(opacity_track.keys) + 1)
+		
+				null_key = NuccAnmKey.FloatLinear(-1, opacity_track.keys[-1].values)
+				opacity_track.keys.append(null_key)
 
-			entry.tracks.append(opacity_track)
-			entry.track_headers.append(opacity_header)
+				entry.tracks.append(opacity_track)
+				entry.track_headers.append(opacity_header)
+			else:
+				opacity_header = create_track_header(3, NuccAnmKeyFormat.FloatFixed, 1)
+				opacity_track.keys = [NuccAnmKey.Float(1)]
+				entry.tracks.append(opacity_track)
+				entry.track_headers.append(opacity_header)
 
 			entries.append(entry)
 
 		return entries
 
-	
 
 	def make_material_entries(self, anm_armature: AnmArmature, struct_references: List[NuccStructReference], clumps: List[AnmClump]) -> List[AnmEntry]:
 		context = bpy.context
@@ -568,23 +573,23 @@ class AnmXfbinExporter:
 				return node.outputs[output_index].default_value
 			return 0
 		
+  
+
+  
 		def create_and_append_track(entry: AnmEntry, track_index: int, key_format: NuccAnmKeyFormat, values: List[float]):
 			""" Create helper method since most material entries have the same structure """
 			track_header = TrackHeader()
 			track_header.track_index = track_index
 
-			if track_index == 4:
-				track_header.key_format = NuccAnmKeyFormat.FloatFixed
-				track_header.frame_count = 1
-
+			
 			track_header.key_format = key_format
 			track_header.frame_count = len(values)
 
 			track = Track()
 
 			for value in values:
-				converted_value: NuccAnmKey = NuccAnmKey.Float(value)
-				track.keys.append(converted_value)
+				#converted_value: NuccAnmKey = NuccAnmKey.Float(value)
+				track.keys.append(value)
 
 			entry.tracks.append(track)
 			entry.track_headers.append(track_header)
@@ -598,12 +603,21 @@ class AnmXfbinExporter:
 
 			if not material.node_tree.animation_data:
 				continue
+			
+			if not material.node_tree.animation_data.action:
+				continue
 
 			
 			nodes = material.node_tree.nodes
 
+			u0_location: List[float] = list()
+			v0_location: List[float] = list()
+
 			u1_location: List[float] = list()
 			v1_location: List[float] = list()
+   
+			u0_scale: List[float] = list()
+			v0_scale: List[float] = list()
 
 			u1_scale: List[float] = list()
 			v1_scale: List[float] = list()
@@ -614,49 +628,87 @@ class AnmXfbinExporter:
 			u2_scale: List[float] = list()
 			v2_scale: List[float] = list()
 
-			blend_values: List[float] = list()
+			u3_location: List[float] = list()
+			v3_location: List[float] = list()
+
+			u3_scale: List[float] = list()
+			v3_scale: List[float] = list()
+
+			blend_rate1_values: List[float] = list()
+			blend_rate2_values: List[float] = list()
+   
+			falloff_values: List[float] = list()
 			glare_values: List[float] = list()
 			alpha_values: List[float] = list()
+   
+			#get nodes
+			nodes = material.node_tree.nodes
+   
+			existing_nodes = {}
 
+			#get uvOffset0 node
+			uv_offset0 = nodes.get("uvOffset0")
+			if uv_offset0:
+				existing_nodes[uv_offset0] = [None, u0_location, v0_location, u0_scale, v0_scale]
+			uv_offset1 = nodes.get("uvOffset1")
+			if uv_offset1:
+				existing_nodes[uv_offset1] = [u1_location, v1_location, u1_scale, v1_scale]
+			uv_offset2 = nodes.get("uvOffset2")
+			if uv_offset2:
+				existing_nodes[uv_offset2] = [u2_location, v2_location, u2_scale, v2_scale]
+			uv_offset3 = nodes.get("uvOffset3")
+			if uv_offset3:
+				existing_nodes[uv_offset3] = [u3_location, v3_location, u3_scale, v3_scale]
+			blend_rate1 = nodes.get("blendRate1")
+			if blend_rate1:
+				existing_nodes[blend_rate1] = blend_rate1_values
+			blend_rate2 = nodes.get("blendRate2")
+			if blend_rate2:
+				existing_nodes[blend_rate2] = blend_rate2_values
+			falloff = nodes.get("falloff")
+			if falloff:
+				existing_nodes[falloff] = falloff_values
+			glare = nodes.get("glare")
+			if glare:
+				existing_nodes[glare] = glare_values
+			alpha = nodes.get("alpha")
+			if alpha:
+				existing_nodes[alpha] = alpha_values
 
-			for frame in range(context.scene.frame_start, context.scene.frame_end + 1):
+			for frame in range(context.scene.frame_end + 1):
 				context.scene.frame_set(frame)
+				for node, curves in existing_nodes.items():
+					for i, curve in enumerate(curves):
+						if type(node.inputs[i].default_value) == float:
+							value = node.inputs[i].default_value
+							curve.append(NuccAnmKey.Float(value))
 
-				uv1_translation = get_node_input_default("Mapping", 1) if "Mapping" in nodes else get_node_input_default("UV_0_Mapping", 1)
-				uv1_scale = get_node_input_default("Mapping", 3) if "Mapping" in nodes else get_node_input_default("UV_0_Mapping", 3)
 
-				uv2_location = get_node_input_default("UV_1_Mapping", 1)
-				uv2_scale = get_node_input_default("UV_1_Mapping", 3) if "UV_1_Mapping" in nodes else [1, 1, 1]
-
-
-				u1_location.append(uv1_translation[0])
-				v1_location.append((-1 * uv1_scale[1]) + (1 - uv1_translation[1])) # Invert Y axis and offset by 1 to match game's UV space 
-				u1_scale.append(uv1_scale[0])
-				v1_scale.append(uv1_scale[1])
-
-				u2_location.append(uv2_location[0])
-				v2_location.append((-1 * uv2_scale[1])+ (1 - uv2_location[1])) 
-				u2_scale.append(uv2_scale[0])
-				v2_scale.append(uv2_scale[1])
-
-				blend_values.append(get_node_output_default("BlendRate", 0) if "BlendRate" in nodes else 0)
-				glare_values.append(get_node_output_default("Glare", 0) if "Glare" in nodes else 0.12)
-				alpha_values.append(get_node_output_default("Alpha", 0) if "Alpha" in nodes else 205.0)
 			
 			# Value is a (track, track_index) tuple
 			material_data_paths = {
-				"u1_location": (u1_location, 0),
-				"v1_location": (v1_location, 1),
-				"u1_scale": (u1_scale, 8),
-				"v1_scale": (v1_scale, 9),
-				"u2_location": (u2_location, 2),
-				"v2_location": (v2_location, 3),
-				"u2_scale": (u2_scale, 10),
-				"v2_scale": (v2_scale, 11),
-				"blend": (blend_values, 12),
+				"u0_location": (u0_location, 0),
+				"v0_location": (v0_location, 1),
+				"u1_location": (u1_location, 2),
+				"v1_location": (v1_location, 3),
+				"u2_location": (u2_location, 4),
+				"v2_location": (v2_location, 5),
+   				"u3_location": (u3_location, 6),
+				"v3_location": (v3_location, 7),
+				"u0_scale": (u0_scale, 8),
+				"v0_scale": (v0_scale, 9),
+				"u1_scale": (u1_scale, 10),
+				"v1_scale": (v1_scale, 11),
+				"blend_rate1": (blend_rate1_values, 12),
+				"blend_rate2": (blend_rate2_values, 13),
+				"falloff": (falloff_values, 14),
 				"glare": (glare_values, 15),
 				"alpha": (alpha_values, 16),
-				"celshade": ([0.0], 4),
+				"outline_id": (alpha_values, 17),
+				"u2_scale": (u2_scale, 18),
+				"v2_scale": (v2_scale, 19),
+				"u3_scale": (u3_scale, 20),
+				"v3_scale": (v3_scale, 21),
 			}
 
 
@@ -673,7 +725,12 @@ class AnmXfbinExporter:
 
 			
 			for _, (values, track_index) in material_data_paths.items():
-				create_and_append_track(entry, track_index, NuccAnmKeyFormat.FloatTable, values)
+				if values:
+					create_and_append_track(entry, track_index, NuccAnmKeyFormat.FloatTable, values)
+				else:
+					# Create a single keyframe for fixed values using the xfbin material props
+					if track_index == 4:
+						create_and_append_track(entry, track_index, NuccAnmKeyFormat.FloatFixed, [NuccAnmKey.Float(0.0)])
 			
 
 
@@ -682,7 +739,6 @@ class AnmXfbinExporter:
 		return entries
 
 
-	from typing import List, Dict, Set
 
 	def make_camera_entries(self, camera: bpy.types.Camera, other_index: int) -> List[AnmEntry]:
 		entries: List[AnmEntry] = []
@@ -799,89 +855,168 @@ class AnmXfbinExporter:
 	
 
 	def make_lightdirc_entries(self, lightdirc: bpy.types.Light, other_index: int) -> List[AnmEntry]:
+		entries: List[AnmEntry] = []
+
+		light_start, light_end = 0, 0
+		rot_start, rot_end = 0, 0
+  
+		combined_fcurves = []
+
+		
+		if lightdirc.data.animation_data:
+			if lightdirc.data.animation_data.action:
+				light_start, light_end = lightdirc.data.animation_data.action.frame_range
+				combined_fcurves += lightdirc.data.animation_data.action.fcurves
+		
+		if lightdirc.animation_data.action:
+			combined_fcurves += lightdirc.animation_data.action.fcurves
+
+			rotation_action = lightdirc.animation_data.action
+  
+			rot_start, rot_end = rotation_action.frame_range
+   
+		if len(combined_fcurves) < 1:
+			return entries
+  
+		#check which action has more frames
+		frame_end = max(rot_end, light_end)
+
 		context = bpy.context
+		light_fcurves = {
+			"color": [{}, {}, {}],
+			"energy": [{}],
+			"rotation_euler": [{}, {}, {}, {}],
+			"rotation_quaternion": [{}, {}, {}, {}]
+		}
 
-		entries: List[AnmEntry] = list()
+		color_frames: Set[int] = set()
+		energy_frames: Set[int] = set()
+		rotation_euler_frames: Set[int] = set()
+		rotation_quat_frames: Set[int] = set()
 
-		colors: List[Vector] = list()
-		energies: List[float] = list()
-		rotations: List[Vector] = list()
+		fcurve_mapping = {
+			"color": (light_fcurves["color"], color_frames),
+			"energy": (light_fcurves["energy"], energy_frames),
+			"rotation_euler": (light_fcurves["rotation_euler"], rotation_euler_frames),
+			"rotation_quaternion": (light_fcurves["rotation_quaternion"], rotation_quat_frames)
+		}
 
-		# Get the light's color, energy, and rotation matrix for each frame
-		for frame in range(context.scene.frame_start, context.scene.frame_end + 1):
-			# Last sanity check to see if camera has animation data
-			if not lightdirc.animation_data:
-				continue
+		for fcurve in combined_fcurves:
+			for path, (target, frame_set) in fcurve_mapping.items():
+				if fcurve.data_path.endswith(path):
+					for i in range(int(frame_end + 1)):
+						light_fcurves[path][fcurve.array_index][i] = fcurve.evaluate(i)
+						frame_set.add(i)
+					break
+		
+		
 
-			context.scene.frame_set(frame)
+		def create_light_tracks(frame_values: Dict[int, List[float]], data_path, key_format, track_index):
+			track_header = TrackHeader(track_index=track_index, key_format=key_format)
+			track = Track()
+			last_values = [0] * len(frame_values[next(iter(frame_values))])
 
-			colors.append(lightdirc.data.color.copy())
-			energies.append(lightdirc.data.energy)
-			rotations.append(lightdirc.matrix_world.to_quaternion().copy())
+			for frame, values in sorted(frame_values.items()):
+				for i, val in enumerate(values):
+					if val is not None:
+						last_values[i] = val
+				converted_value = convert_light_values(data_path, last_values, key_format)
+				track.keys.append(converted_value)
 
-		# ------------------- entry -------------------
+			#dupe last keyframe
+			converted_value = convert_light_values(data_path, last_values)
+			track.keys.append(converted_value)
+
+			track_header.frame_count = len(track.keys)
+			return track, track_header
+
+		def create_single_frame_track(data_path, key_format, track_index, value):
+			single_track_header = TrackHeader(track_index=track_index, key_format=key_format)
+			single_track = Track()
+			converted_value = convert_light_values(data_path, value, key_format)
+			single_track.keys.append(converted_value)
+			single_track_header.frame_count = 1
+			return single_track, single_track_header
+
+		colors = {frame: [light_fcurves["color"][i].get(frame, None) for i in range(3)] for frame in color_frames}
+
+		energies = {frame: [light_fcurves["energy"][0].get(frame, None)] for frame in energy_frames}
+
+		rotations_euler = {
+			frame: [
+				light_fcurves["rotation_euler"][i].get(frame, None) for i in range(3)
+			] for frame in rotation_euler_frames
+		}
+  
+		rotations_quat = {
+			frame: [
+				light_fcurves["rotation_quaternion"][i].get(frame, None) for i in range(4)
+			] for frame in rotation_quat_frames
+		}
+  
+
+
 		entry = AnmEntry()
 		entry.coord = AnmCoord(-1, other_index)
 		entry.entry_format = EntryFormat.LightDirc
 
-		# ------------------- color -------------------
-		color_track_header = TrackHeader()
-		color_track = Track()
+		if len(color_frames) >= 1:
+			track, header = create_light_tracks(colors, "color", NuccAnmKeyFormat.ColorRGBTable, 0)
+			entry.tracks.append(track)
+			entry.track_headers.append(header)
+		else:
+			# create a single keyframe and take the default value
+			track = Track()
+			track_header = TrackHeader()
+			track_header.track_index = 0
+			track_header.key_format = NuccAnmKeyFormat.ColorRGBTable
+			
+			for i in range(int(frame_end + 2)):
+				converted_value = convert_light_values("color", lightdirc.data.color)
+				track.keys.append(converted_value)
+   
+			track_header.frame_count = len(track.keys)
+			entry.tracks.append(track)
+			entry.track_headers.append(track_header)
+   
+		if len(energy_frames) >= 1:
+			track, header = create_light_tracks(energies, "energy", NuccAnmKeyFormat.FloatTable, 1)
+			entry.tracks.append(track)
+			entry.track_headers.append(header)
+		else:
+			# create a single keyframe and take the default value
+			track, header = create_single_frame_track("energy", NuccAnmKeyFormat.FloatFixed, 1, [lightdirc.data.energy])
+			entry.tracks.append(track)
+			entry.track_headers.append(header)
+   
 
-		for value in colors:
-			color_track_header.track_index = 0
-			color_track_header.key_format = NuccAnmKeyFormat.ColorRGBTable
-			color_track_header.frame_count = len(colors)
+		if len(rotation_quat_frames) >= 1:
+			track, header = create_light_tracks(rotations_quat, "rotation_quaternion", NuccAnmKeyFormat.QuaternionShortTable, 2)
+			entry.tracks.append(track)
+			entry.track_headers.append(header)
 
-			converted_value: NuccAnmKey = convert_object_value("color", list(map(lambda x: round(x, 2), value[:])))
+		elif len(rotation_euler_frames) >= 1:
+			track, header = create_light_tracks(rotations_euler, "rotation_euler", NuccAnmKeyFormat.QuaternionShortTable, 2)
+			entry.tracks.append(track)
+			entry.track_headers.append(header)
+		else:
+			# create a single keyframe and take the default value
+			track = Track()
+			track_header = TrackHeader()
+			track_header.track_index = 2
+			track_header.key_format = NuccAnmKeyFormat.EulerXYZFixed
+			
+			converted_value = NuccAnmKey.Vec3(tuple(math.radians(x) for x in lightdirc.matrix_world.to_euler()))
+			track.keys.append(converted_value)
+   
+			track_header.frame_count = len(track.keys)
+			entry.tracks.append(track)
+			entry.track_headers.append(track_header)
 
-			color_track.keys.append(converted_value)
-
-		# Pad color_track.keys with the last value so the length is a multiple of 4
-		while len(color_track.keys) % 4 != 0:
-			color_track.keys.append(color_track.keys[-1])
-
-		# Update the frame count to reflect the new length
-		color_track_header.frame_count = len(color_track.keys)
-		
-		entry.tracks.append(color_track)
-		entry.track_headers.append(color_track_header)
-
-
-		# ------------------- energy -------------------
-		energy_track_header = TrackHeader()
-		energy_track = Track()
-
-		for value in energies:
-			energy_track_header.track_index = 1
-			energy_track_header.key_format = NuccAnmKeyFormat.FloatTable
-			energy_track_header.frame_count = len(energies)
-
-			energy_track.keys.append(NuccAnmKey.Float(value))
-		
-		entry.tracks.append(energy_track)
-		entry.track_headers.append(energy_track_header)
-
-		# ------------------- rotation quaternion -------------------
-		rotation_track_header = TrackHeader()
-		rotation_track = Track()
-
-		for value in rotations:
-			rotation_track_header.track_index = 2
-			rotation_track_header.key_format = NuccAnmKeyFormat.QuaternionShortTable
-			rotation_track_header.frame_count = len(rotations)
-
-			converted_value: NuccAnmKey = convert_object_value("rotation_quaternion", value[:])
-
-			rotation_track.keys.append(converted_value)
-
-		entry.tracks.append(rotation_track)
-		entry.track_headers.append(rotation_track_header)
 
 		entries.append(entry)
-
-
 		return entries
+
 
 	def make_lightpoint_entries(self, lightpoint: bpy.types.Light, other_index: int) -> List[AnmEntry]:
 		context = bpy.context
@@ -1075,4 +1210,4 @@ class AnmXfbinExporter:
 
 		
 def menu_export(self, context):
-	self.layout.operator(ExportAnmXfbin.bl_idname, text='XFBIN Animation Container (.xfbin)')
+	self.layout.operator(ExportAnmXfbin.bl_idname, text='XFBIN Animation Container (.xfbin)') 
