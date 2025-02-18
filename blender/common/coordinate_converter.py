@@ -112,8 +112,8 @@ def convert_object_value(sensor_width, data_path: str, values: List[float], fram
 	return values
 
 
-def convert_light_values(data_path, values, key_format = None):
-	def translate(seq: List[float]) -> Tuple[float]:
+def convert_light_values(data_path, values, key_format = None, frame = 0) -> NuccAnmKey:
+	def translate(seq: List[float]):
 		return tuple(s * 100 for s in seq)
 
 	def rotate_quaternion(seq: List[float]) -> Tuple[int, int, int, int]:
@@ -122,20 +122,65 @@ def convert_light_values(data_path, values, key_format = None):
 		return tuple(int(x * QUAT_COMPRESS) for x in rotation)
 
 	def rotate_euler(seq: List[float]) -> Tuple[int, int, int]:
+		#invert the x axis
+		#seq = [seq[0], -seq[1], seq[2]]
 		rotation = Euler(seq).to_quaternion().inverted()
-		rotation = Quaternion((rotation.x, rotation.y, rotation.z, rotation.w))
+		rotation = (rotation.x, rotation.y, rotation.z, rotation.w)
 		return tuple(int(x * QUAT_COMPRESS) for x in rotation)
 
-	match data_path:
-		case 'location':
+	match data_path, key_format:
+		case 'location', NuccAnmKeyFormat.Vector3Linear:
+			return NuccAnmKey.Vec3Linear(int(frame) * 100, translate(values))
+		case 'location', NuccAnmKeyFormat.Vector3Fixed:
 			return NuccAnmKey.Vec3(translate(values))
-		case 'rotation_quaternion':
+		case 'location', NuccAnmKeyFormat.Vector3Table:
+			return NuccAnmKey.Vec3(translate(values))
+		case 'rotation_quaternion', NuccAnmKeyFormat.QuaternionShortTable:
 			return NuccAnmKey.ShortVec4(rotate_quaternion(values))
-		case 'rotation_euler':
+		case 'rotation_euler', NuccAnmKeyFormat.QuaternionShortTable:
 			return NuccAnmKey.ShortVec4(rotate_euler(values))
-		case 'color':
-			color = [int(x * 255) for x in values]
+		case 'xfbin_scene.lightdir_color', NuccAnmKeyFormat.ColorRGBTable:
+			color = (int(x * 255) for x in values)
 			return NuccAnmKey.Color(tuple(color))
-		case "energy":
+		case "xfbin_scene.lightpoint_color0", NuccAnmKeyFormat.ColorRGBTable:
+			color = (int(x * 255) for x in values)
+			return NuccAnmKey.Color(tuple(color))
+		case "xfbin_scene.ambient_color", NuccAnmKeyFormat.ColorRGBTable:
+			color = (int(x * 255) for x in values)
+			return NuccAnmKey.Color(tuple(color))
+
+		case "xfbin_scene.lightdir_intensity", NuccAnmKeyFormat.FloatLinear:
 			return NuccAnmKey.Float(values[0])
+		case "xfbin_scene.lightdir_intensity", NuccAnmKeyFormat.FloatTable:
+			return NuccAnmKey.Float(values[0])
+		case "xfbin_scene.lightdir_intensity", NuccAnmKeyFormat.FloatFixed:
+			return NuccAnmKey.Float(values[0])
+
+		case "xfbin_scene.lightpoint_intensity0", NuccAnmKeyFormat.FloatLinear:
+			return NuccAnmKey.Float(values[0])
+		case "xfbin_scene.lightpoint_intensity0", NuccAnmKeyFormat.FloatTable:
+			return NuccAnmKey.Float(values[0])
+		case "xfbin_scene.lightpoint_intensity0", NuccAnmKeyFormat.FloatFixed:
+			return NuccAnmKey.Float(values[0])
+
+		case "xfbin_scene.lightpoint_range0", NuccAnmKeyFormat.FloatLinear:
+			return NuccAnmKey.Float(round(values[0]) * 100)
+		case "xfbin_scene.lightpoint_range0", NuccAnmKeyFormat.FloatTable:
+			return NuccAnmKey.Float(round(values[0]) * 100)
+		case "xfbin_scene.lightpoint_range0", NuccAnmKeyFormat.FloatFixed:
+			return NuccAnmKey.Float(round(values[0]) * 100)
+
+		case "xfbin_scene.lightpoint_attenuation0", NuccAnmKeyFormat.FloatLinear:
+			return NuccAnmKey.Float(round(values[0]))
+		case "xfbin_scene.lightpoint_attenuation0", NuccAnmKeyFormat.FloatTable:
+			return NuccAnmKey.Float(round(values[0]))
+		case "xfbin_scene.lightpoint_attenuation0", NuccAnmKeyFormat.FloatFixed:
+			return NuccAnmKey.Float(round(values[0]))
+
+		case "xfbin_scene.ambient_intensity", NuccAnmKeyFormat.FloatTable:
+			return NuccAnmKey.Float(values[0])
+
+		case _:
+			raise ValueError(f"Unsupported data path: {data_path}")
+
 	return values

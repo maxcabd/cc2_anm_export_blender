@@ -66,6 +66,24 @@ class ExportAnmXfbin(Operator, ExportHelper):
 		'NOTE: "Inject to existing XFBIN" has to be enabled for this option to take effect\n',					
 		default=True,
 	)"""
+	
+	export_material_animations: BoolProperty(
+		name='Export Material Animations',
+		description='If True, will export material animations from the selected collection',
+		default=True,
+	)
+ 
+	export_ambient: BoolProperty(
+		name='Export Ambient',
+		description='If True, will export ambient data from XFBIN Scene Manager',
+		default=False,
+	)
+ 
+	export_fog: BoolProperty(
+		name='Export Fog',
+		description='If True, will export fog data from XFBIN Scene Manager',
+		default=False,
+	)
 
 	def draw(self, context):
 		layout = self.layout
@@ -76,6 +94,12 @@ class ExportAnmXfbin(Operator, ExportHelper):
 		if self.collection:
 			inject_row = layout.row()
 			inject_row.prop(self, 'inject_to_xfbin')
+			#inject_row.prop(self, 'inject_to_clump')
+			row = layout.row()
+			row.prop(self, 'export_material_animations')
+			row = layout.row()
+			row.prop(self, 'export_fog')
+			row.prop(self, 'export_ambient')
 		
 
 	def execute(self, context):
@@ -104,6 +128,9 @@ class AnmXfbinExporter:
 		self.filepath = filepath
 		self.collection: bpy.types.Collection = bpy.data.collections[export_settings.get('collection')]
 		self.inject_to_xfbin = export_settings.get('inject_to_xfbin')
+		self.export_materials = export_settings.get('export_material_animations')
+		self.export_fog = export_settings.get('export_fog')
+		self.export_ambient = export_settings.get('export_ambient')
 		
 
 	
@@ -124,6 +151,10 @@ class AnmXfbinExporter:
 				anm_chunks_obj = obj
 
 		anm_chunks_data = anm_chunks_obj.xfbin_anm_chunks_data
+		xfbin_scene = bpy.context.scene.xfbin_scene
+  
+		#set timeline to 0
+		bpy.context.scene.frame_set(0)
 
 		for anm_chunk in anm_chunks_data.anm_chunks:
 
@@ -161,8 +192,8 @@ class AnmXfbinExporter:
 					nucc_lightdirc = NuccLightDirc()
 					nucc_lightdirc.struct_info = NuccStructInfo(lightdirc_name, "nuccChunkLightDirc", light_prop.path)
 
-					nucc_lightdirc.color = lightdirc.data.color
-					nucc_lightdirc.energy = lightdirc.data.energy
+					nucc_lightdirc.color = xfbin_scene.lightdir_color
+					nucc_lightdirc.energy = xfbin_scene.lightdir_intensity
 					light_default_rot = lightdirc.matrix_world.to_quaternion().inverted()
 					nucc_lightdirc.rotation = [light_default_rot.x, light_default_rot.y, light_default_rot.z, light_default_rot.w]
 
@@ -178,37 +209,44 @@ class AnmXfbinExporter:
 					nucc_lightpoint = NuccLightPoint()
 					nucc_lightpoint.struct_info = NuccStructInfo(lightpoint_name, "nuccChunkLightPoint", light_prop.path)
 
-					nucc_lightpoint.color = lightpoint.data.color
-					nucc_lightpoint.energy = lightpoint.data.energy
+					nucc_lightpoint.color = xfbin_scene.lightpoint_color0
+					nucc_lightpoint.energy = xfbin_scene.lightpoint_intensity0
 
-					converted_value: List[int] = convert_object_value("location", lightpoint.matrix_world.to_translation().copy()[:]).values
+					converted_value: List[int] = convert_object_value(0, "location", lightpoint.matrix_world.to_translation().copy()[:]).values
 					nucc_lightpoint.location = converted_value
 
-					nucc_lightpoint.radius = lightpoint.data.shadow_soft_size
+					nucc_lightpoint.radius = xfbin_scene.lightpoint_range0
 					
-					if lightpoint.data.use_custom_distance:
-						nucc_lightpoint.cutoff = lightpoint.data.cutoff_distance
-					else:
-						nucc_lightpoint.cutoff = 0.0
+					nucc_lightpoint.cutoff = xfbin_scene.lightpoint_attenuation0
+
 
 					page.structs.append(nucc_lightpoint)
 			
-			if anm_chunk.ambients:
-				for light_prop in anm_chunk.ambients:
-					ambient_obj = bpy.data.objects.get(light_prop.name)
-					if not ambient_obj:
-						continue
-					ambient_name = light_prop.name.split(' (')[0] if ' (' in light_prop.name else light_prop.name
+			if self.export_ambient:
+				nucc_ambient = NuccAmbient()
+				nucc_ambient.struct_info = NuccStructInfo(anm_chunk_name, "nuccChunkAmbient", anm_chunk.path)
 
-					nucc_ambient = NuccAmbient()
-					nucc_ambient.struct_info = NuccStructInfo(ambient_name, "nuccChunkAmbient", light_prop.path)
+				nucc_ambient.color = xfbin_scene.ambient_color
+				nucc_ambient.energy = 1.0
 
-					nucc_ambient.color = ambient_obj.data.color
-					nucc_ambient.energy = ambient_obj.data.energy
+				page.structs.append(nucc_ambient)
 
-					page.structs.append(nucc_ambient)
-			
-			
+   
+			if self.export_fog:
+				# create fog binary chunk
+				fog_chunk = NuccBinary()
+				fog_chunk.struct_info = NuccStructInfo(f"{anm_chunk_name}_fog", "nuccChunkBinary", f"{anm_chunk.path[:-4]}_fog.fcv")
+
+				fog_data = "FCURVE_TYPE_FOG,\n"
+				fog_data += f"FCURVE_INTERPOLATION_LINEAR,\n"
+				fog_data += f'1,\n'
+				fog_data += f"0,{xfbin_scene.fog_density/100:.6f},{xfbin_scene.fog_color[0]:.6f},{xfbin_scene.fog_color[1]:.6f},{xfbin_scene.fog_color[2]:.6f},{xfbin_scene.fog_start:.6f},{xfbin_scene.fog_end:.6f},0\n"
+	
+				fog_chunk.data = fog_data.encode('utf-8')
+	
+				page.structs.append(fog_chunk)
+				
+				
 			nucc_anm: NuccAnm = self.make_anm(anm_chunk, anm_clumps, page.struct_infos)
 			page.structs.append(nucc_anm)
 			
@@ -295,7 +333,7 @@ class AnmXfbinExporter:
 					
 		for armature in anm_armatures:
 			anm.entries.extend(self.make_coord_entries(armature, struct_references, anm.clumps, fcurve_dict))
-			if anm_chunk.export_material_animations:
+			if self.export_materials:
 				anm.entries.extend(self.make_material_entries(armature, struct_references, anm.clumps))
 
 
@@ -323,13 +361,10 @@ class AnmXfbinExporter:
 				anm.entries.extend(self.make_lightpoint_entries(lightpoint, index + len(anm_chunk.cameras) + len(anm_chunk.lightdircs)))
 				anm.other_entries_indices.append(len(struct_infos) + index + len(anm_chunk.cameras) + len(anm_chunk.lightdircs))
 
-		if anm_chunk.ambients:
-			for index, light_prop in enumerate(anm_chunk.ambients):
-				ambient = bpy.data.objects.get(light_prop.name)
-				if not ambient:
-					continue
-				anm.entries.extend(self.make_ambient_entries(ambient, index + len(anm_chunk.cameras) + len(anm_chunk.lightdircs) + len(anm_chunk.lightpoints)))
-				anm.other_entries_indices.append(len(struct_infos) + index + len(anm_chunk.cameras) + len(anm_chunk.lightdircs) + len(anm_chunk.lightpoints))
+		if self.export_ambient:
+			
+			anm.entries.extend(self.make_ambient_entries(index + len(anm_chunk.cameras) + len(anm_chunk.lightdircs) + len(anm_chunk.lightpoints)))
+			anm.other_entries_indices.append(len(struct_infos) + index + len(anm_chunk.cameras) + len(anm_chunk.lightdircs) + len(anm_chunk.lightpoints))
 
 		return anm
 			
@@ -560,23 +595,7 @@ class AnmXfbinExporter:
 
 		entries: List[AnmEntry] = list()
 
-		def get_node_input_default(node_name: str, input_index: int):
-			node = nodes.get(node_name)
-			if node:
-				return node.inputs[input_index].default_value
-			return [0, 0, 0]
-		
-
-		def get_node_output_default(node_name: str, output_index: int):
-			node = nodes.get(node_name)
-			if node:
-				return node.outputs[output_index].default_value
-			return 0
-		
-  
-
-  
-		def create_and_append_track(entry: AnmEntry, track_index: int, key_format: NuccAnmKeyFormat, values: List[float]):
+		def create_and_append_track(entry: AnmEntry, track_index: int, key_format: NuccAnmKeyFormat, values: List[float], frame_count: int = 1):
 			""" Create helper method since most material entries have the same structure """
 			track_header = TrackHeader()
 			track_header.track_index = track_index
@@ -586,11 +605,17 @@ class AnmXfbinExporter:
 			track_header.frame_count = len(values)
 
 			track = Track()
+   
+			
+   
+			if key_format == NuccAnmKeyFormat.FloatTable:
+				for f, value in values.items():
+					track.keys.append(NuccAnmKey.Float(value))
+     
+			elif key_format == NuccAnmKeyFormat.FloatFixed:
+				track.keys.append(NuccAnmKey.Float(values[0]))
 
-			for value in values:
-				#converted_value: NuccAnmKey = NuccAnmKey.Float(value)
-				track.keys.append(value)
-
+     
 			entry.tracks.append(track)
 			entry.track_headers.append(track_header)
 
@@ -601,138 +626,115 @@ class AnmXfbinExporter:
 			if not material:
 				continue
 
-			if not material.node_tree.animation_data:
+			if not material.animation_data:
 				continue
 			
-			if not material.node_tree.animation_data.action:
+			if not material.animation_data.action:
 				continue
 
-			
-			nodes = material.node_tree.nodes
 
-			u0_location: List[float] = list()
-			v0_location: List[float] = list()
-
-			u1_location: List[float] = list()
-			v1_location: List[float] = list()
-   
-			u0_scale: List[float] = list()
-			v0_scale: List[float] = list()
-
-			u1_scale: List[float] = list()
-			v1_scale: List[float] = list()
-
-			u2_location: List[float] = list()
-			v2_location: List[float] = list()
-			
-			u2_scale: List[float] = list()
-			v2_scale: List[float] = list()
-
-			u3_location: List[float] = list()
-			v3_location: List[float] = list()
-
-			u3_scale: List[float] = list()
-			v3_scale: List[float] = list()
-
-			blend_rate1_values: List[float] = list()
-			blend_rate2_values: List[float] = list()
-   
-			falloff_values: List[float] = list()
-			glare_values: List[float] = list()
-			alpha_values: List[float] = list()
-   
-			#get nodes
-			nodes = material.node_tree.nodes
-   
-			existing_nodes = {}
-
-			#get uvOffset0 node
-			uv_offset0 = nodes.get("uvOffset0")
-			if uv_offset0:
-				existing_nodes[uv_offset0] = [None, u0_location, v0_location, u0_scale, v0_scale]
-			uv_offset1 = nodes.get("uvOffset1")
-			if uv_offset1:
-				existing_nodes[uv_offset1] = [u1_location, v1_location, u1_scale, v1_scale]
-			uv_offset2 = nodes.get("uvOffset2")
-			if uv_offset2:
-				existing_nodes[uv_offset2] = [u2_location, v2_location, u2_scale, v2_scale]
-			uv_offset3 = nodes.get("uvOffset3")
-			if uv_offset3:
-				existing_nodes[uv_offset3] = [u3_location, v3_location, u3_scale, v3_scale]
-			blend_rate1 = nodes.get("blendRate1")
-			if blend_rate1:
-				existing_nodes[blend_rate1] = blend_rate1_values
-			blend_rate2 = nodes.get("blendRate2")
-			if blend_rate2:
-				existing_nodes[blend_rate2] = blend_rate2_values
-			falloff = nodes.get("falloff")
-			if falloff:
-				existing_nodes[falloff] = falloff_values
-			glare = nodes.get("glare")
-			if glare:
-				existing_nodes[glare] = glare_values
-			alpha = nodes.get("alpha")
-			if alpha:
-				existing_nodes[alpha] = alpha_values
-
-			for frame in range(context.scene.frame_end + 1):
-				context.scene.frame_set(frame)
-				for node, curves in existing_nodes.items():
-					for i, curve in enumerate(curves):
-						if type(node.inputs[i].default_value) == float:
-							value = node.inputs[i].default_value
-							curve.append(NuccAnmKey.Float(value))
-
-
-			
-			# Value is a (track, track_index) tuple
-			material_data_paths = {
-				"u0_location": (u0_location, 0),
-				"v0_location": (v0_location, 1),
-				"u1_location": (u1_location, 2),
-				"v1_location": (v1_location, 3),
-				"u2_location": (u2_location, 4),
-				"v2_location": (v2_location, 5),
-   				"u3_location": (u3_location, 6),
-				"v3_location": (v3_location, 7),
-				"u0_scale": (u0_scale, 8),
-				"v0_scale": (v0_scale, 9),
-				"u1_scale": (u1_scale, 10),
-				"v1_scale": (v1_scale, 11),
-				"blend_rate1": (blend_rate1_values, 12),
-				"blend_rate2": (blend_rate2_values, 13),
-				"falloff": (falloff_values, 14),
-				"glare": (glare_values, 15),
-				"alpha": (alpha_values, 16),
-				"outline_id": (alpha_values, 17),
-				"u2_scale": (u2_scale, 18),
-				"v2_scale": (v2_scale, 19),
-				"u3_scale": (u3_scale, 20),
-				"v3_scale": (v3_scale, 21),
+			material_fcurves = {
+				"uvOffset0": [{}, {}, {}, {}],
+				"uvOffset1": [{}, {}, {}, {}],
+				"uvOffset2": [{}, {}, {}, {}],
+				"uvOffset3": [{}, {}, {}, {}],
+				"alpha": [{}],
+				"glare": [{}],
+				"blendRate": [{}, {}],
+				"fallOff": [{}],
+				"outlineID": [{}]
 			}
 
-
-			# ------------------- entry -------------------
+			fcurve_count_dict = {
+				"uvOffset0": -1,
+				"uvOffset1": -1,
+				"uvOffset2": -1,
+				"uvOffset3": -1,	
+				"blendRate": -1,
+				"alpha": -1,
+				"glare": -1,
+				"fallOff": -1,
+				"outlineID": -1
+			}
+   
+			fcurve_index_dict = {
+				"uvOffset0": [0, 1, 8, 9],
+				"uvOffset1": [2, 3, 10, 11],
+				"uvOffset2": [4, 5, 18, 19],
+				"uvOffset3": [6, 7, 20, 21],
+				"blendRate": [12, 13],
+				"alpha": [16],
+				"glare": [15],
+				"fallOff": [14],
+				"outlineID": [17]
+			}
+   
 			clump_reference_index = struct_references.index(anm_armature.nucc_struct_references[0])
 			clump_index = next((i for i, clump in enumerate(clumps) if clump.clump_index == clump_reference_index), None)
 
 			material_reference_index = struct_references.index(NuccStructReference(material_name, NuccStructInfo(material_name, "nuccChunkMaterial", anm_armature.chunk_path)))
 			material_index = next((i for i, material in enumerate(clumps[clump_index].bone_material_indices) if material == material_reference_index), None)
-
+   
 			entry = AnmEntry()
 			entry.coord = AnmCoord(clump_index, material_index)
 			entry.entry_format = EntryFormat.Material
+   
+			for fcurve in material.animation_data.action.fcurves:
+				for path in material_fcurves.keys():
+					if fcurve.data_path.endswith(path):
+						fcurve_count_dict[path] += 1
+						frame_start, frame_end = fcurve.range()
+						
+						#evaluate fcurve
+						for i in range(int(frame_start), int(frame_end) + 1):
+							value = fcurve.evaluate(i)
+							material_fcurves[path][fcurve_count_dict[path]][i] = value
 
+						create_and_append_track(entry, fcurve_index_dict[path][fcurve_count_dict[path]], NuccAnmKeyFormat.FloatTable, material_fcurves[path][fcurve_count_dict[path]], frame_end)
+						break
 			
-			for _, (values, track_index) in material_data_paths.items():
-				if values:
-					create_and_append_track(entry, track_index, NuccAnmKeyFormat.FloatTable, values)
-				else:
-					# Create a single keyframe for fixed values using the xfbin material props
-					if track_index == 4:
-						create_and_append_track(entry, track_index, NuccAnmKeyFormat.FloatFixed, [NuccAnmKey.Float(0.0)])
-			
+   
+			#create and export default values
+			if material.xfbin_material_data.UV0 and not material_fcurves["uvOffset0"][0]:
+				create_and_append_track(entry, 0, NuccAnmKeyFormat.FloatFixed, [material.xfbin_material_data.uvOffset0[0]])
+				create_and_append_track(entry, 1, NuccAnmKeyFormat.FloatFixed, [material.xfbin_material_data.uvOffset0[1]])
+				create_and_append_track(entry, 8, NuccAnmKeyFormat.FloatFixed, [material.xfbin_material_data.uvOffset0[2]])
+				create_and_append_track(entry, 9, NuccAnmKeyFormat.FloatFixed, [material.xfbin_material_data.uvOffset0[3]])
 
+			if material.xfbin_material_data.UV1 and not material_fcurves["uvOffset1"][0]:
+				create_and_append_track(entry, 2, NuccAnmKeyFormat.FloatFixed, [material.xfbin_material_data.uvOffset1[0]])
+				create_and_append_track(entry, 3, NuccAnmKeyFormat.FloatFixed, [material.xfbin_material_data.uvOffset1[1]])
+				create_and_append_track(entry, 10, NuccAnmKeyFormat.FloatFixed, [material.xfbin_material_data.uvOffset1[2]])
+				create_and_append_track(entry, 11, NuccAnmKeyFormat.FloatFixed, [material.xfbin_material_data.uvOffset1[3]])
+                            
+			if material.xfbin_material_data.UV2 and not material_fcurves["uvOffset2"][0]:
+				create_and_append_track(entry, 4, NuccAnmKeyFormat.FloatFixed, [material.xfbin_material_data.uvOffset2[0]])
+				create_and_append_track(entry, 5, NuccAnmKeyFormat.FloatFixed, [material.xfbin_material_data.uvOffset2[1]])
+				create_and_append_track(entry, 18, NuccAnmKeyFormat.FloatFixed, [material.xfbin_material_data.uvOffset2[2]])
+				create_and_append_track(entry, 19, NuccAnmKeyFormat.FloatFixed, [material.xfbin_material_data.uvOffset2[3]])
+			
+			if material.xfbin_material_data.UV3 and not material_fcurves["uvOffset3"][0]:
+				create_and_append_track(entry, 6, NuccAnmKeyFormat.FloatFixed, [material.xfbin_material_data.uvOffset3[0]])
+				create_and_append_track(entry, 7, NuccAnmKeyFormat.FloatFixed, [material.xfbin_material_data.uvOffset3[1]])
+				create_and_append_track(entry, 20, NuccAnmKeyFormat.FloatFixed, [material.xfbin_material_data.uvOffset3[2]])
+				create_and_append_track(entry, 21, NuccAnmKeyFormat.FloatFixed, [material.xfbin_material_data.uvOffset3[3]])
+            
+			if material.xfbin_material_data.blendRate and not material_fcurves["blendRate"][0]:
+				create_and_append_track(entry, 12, NuccAnmKeyFormat.FloatFixed, [material.xfbin_material_data.blendRate[0]])
+				create_and_append_track(entry, 13, NuccAnmKeyFormat.FloatFixed, [material.xfbin_material_data.blendRate[1]])
+    
+			if material.xfbin_material_data.alpha and not material_fcurves["alpha"][0]:
+				create_and_append_track(entry, 16, NuccAnmKeyFormat.FloatFixed, [round(material.xfbin_material_data.alpha * 255)])
+    
+			if material.xfbin_material_data.glare and not material_fcurves["glare"][0]:
+				create_and_append_track(entry, 15, NuccAnmKeyFormat.FloatFixed, [material.xfbin_material_data.glare])
+    
+			if material.xfbin_material_data.fallOff and not material_fcurves["fallOff"][0]:
+				create_and_append_track(entry, 14, NuccAnmKeyFormat.FloatFixed, [material.xfbin_material_data.fallOff])
+    
+			if material.xfbin_material_data.outlineID and not material_fcurves["outlineID"][0]:
+				create_and_append_track(entry, 17, NuccAnmKeyFormat.FloatFixed, [material.xfbin_material_data.outlineID])
+    
 
 			entries.append(entry)
 
@@ -863,10 +865,14 @@ class AnmXfbinExporter:
 		combined_fcurves = []
 
 		
-		if lightdirc.data.animation_data:
-			if lightdirc.data.animation_data.action:
-				light_start, light_end = lightdirc.data.animation_data.action.frame_range
-				combined_fcurves += lightdirc.data.animation_data.action.fcurves
+		#check if xfbin scene has a lightdirc color animation
+		if bpy.context.scene.get("xfbin_scene"):
+			xfbin_scene = bpy.context.scene.xfbin_scene
+   
+			if bpy.context.scene.animation_data.action:
+				combined_fcurves += bpy.context.scene.animation_data.action.fcurves
+
+				light_start, light_end = bpy.context.scene.animation_data.action.frame_range
 		
 		if lightdirc.animation_data.action:
 			combined_fcurves += lightdirc.animation_data.action.fcurves
@@ -883,8 +889,8 @@ class AnmXfbinExporter:
 
 		context = bpy.context
 		light_fcurves = {
-			"color": [{}, {}, {}],
-			"energy": [{}],
+			"xfbin_scene.lightdir_color": [{}, {}, {}],
+			"xfbin_scene.lightdir_intensity": [{}],
 			"rotation_euler": [{}, {}, {}, {}],
 			"rotation_quaternion": [{}, {}, {}, {}]
 		}
@@ -895,8 +901,8 @@ class AnmXfbinExporter:
 		rotation_quat_frames: Set[int] = set()
 
 		fcurve_mapping = {
-			"color": (light_fcurves["color"], color_frames),
-			"energy": (light_fcurves["energy"], energy_frames),
+			"xfbin_scene.lightdir_color": (light_fcurves["xfbin_scene.lightdir_color"], color_frames),
+			"xfbin_scene.lightdir_intensity": (light_fcurves["xfbin_scene.lightdir_intensity"], energy_frames),
 			"rotation_euler": (light_fcurves["rotation_euler"], rotation_euler_frames),
 			"rotation_quaternion": (light_fcurves["rotation_quaternion"], rotation_quat_frames)
 		}
@@ -924,7 +930,7 @@ class AnmXfbinExporter:
 				track.keys.append(converted_value)
 
 			#dupe last keyframe
-			converted_value = convert_light_values(data_path, last_values)
+			converted_value = convert_light_values(data_path, last_values, key_format)
 			track.keys.append(converted_value)
 
 			track_header.frame_count = len(track.keys)
@@ -938,9 +944,9 @@ class AnmXfbinExporter:
 			single_track_header.frame_count = 1
 			return single_track, single_track_header
 
-		colors = {frame: [light_fcurves["color"][i].get(frame, None) for i in range(3)] for frame in color_frames}
+		colors = {frame: [light_fcurves["xfbin_scene.lightdir_color"][i].get(frame, None) for i in range(3)] for frame in color_frames}
 
-		energies = {frame: [light_fcurves["energy"][0].get(frame, None)] for frame in energy_frames}
+		energies = {frame: [light_fcurves["xfbin_scene.lightdir_intensity"][0].get(frame, None)] for frame in energy_frames}
 
 		rotations_euler = {
 			frame: [
@@ -960,8 +966,14 @@ class AnmXfbinExporter:
 		entry.coord = AnmCoord(-1, other_index)
 		entry.entry_format = EntryFormat.LightDirc
 
-		if len(color_frames) >= 1:
-			track, header = create_light_tracks(colors, "color", NuccAnmKeyFormat.ColorRGBTable, 0)
+		if len(color_frames) >= 1:      
+			track, header = create_light_tracks(colors, "xfbin_scene.lightdir_color", NuccAnmKeyFormat.ColorRGBTable, 0)
+   
+			while len(track.keys) % 4 != 0:
+				track.keys.append(track.keys[-1])
+
+			# Update the frame count to reflect the new length	
+			header.frame_count = len(track.keys)
 			entry.tracks.append(track)
 			entry.track_headers.append(header)
 		else:
@@ -971,21 +983,24 @@ class AnmXfbinExporter:
 			track_header.track_index = 0
 			track_header.key_format = NuccAnmKeyFormat.ColorRGBTable
 			
-			for i in range(int(frame_end + 2)):
-				converted_value = convert_light_values("color", lightdirc.data.color)
+			for i in range(int(frame_end)):
+				converted_value = convert_light_values("xfbin_scene.lightdir_color", lightdirc.data.color)
 				track.keys.append(converted_value)
+    
+			while len(track.keys) % 4 != 0:
+				track.keys.append(track.keys[-1])
    
 			track_header.frame_count = len(track.keys)
 			entry.tracks.append(track)
 			entry.track_headers.append(track_header)
    
 		if len(energy_frames) >= 1:
-			track, header = create_light_tracks(energies, "energy", NuccAnmKeyFormat.FloatTable, 1)
+			track, header = create_light_tracks(energies, "xfbin_scene.lightdir_intensity", NuccAnmKeyFormat.FloatTable, 1)
 			entry.tracks.append(track)
 			entry.track_headers.append(header)
 		else:
 			# create a single keyframe and take the default value
-			track, header = create_single_frame_track("energy", NuccAnmKeyFormat.FloatFixed, 1, [lightdirc.data.energy])
+			track, header = create_single_frame_track("xfbin_scene.lightdir_intensity", NuccAnmKeyFormat.FloatFixed, 1, [lightdirc.data.energy])
 			entry.tracks.append(track)
 			entry.track_headers.append(header)
    
@@ -1019,193 +1034,247 @@ class AnmXfbinExporter:
 
 
 	def make_lightpoint_entries(self, lightpoint: bpy.types.Light, other_index: int) -> List[AnmEntry]:
-		context = bpy.context
+		entries: List[AnmEntry] = []
 
-		entries: List[AnmEntry] = list()
+		light_start, light_end = 0, 0
+		combined_fcurves = []
 
-		colors: List[Vector] = list()
-		energies: List[float] = list()
-		translations: List[Vector] = list()
-		radii: List[float] = list()
-		cutoffs: List[float] = list()
+		# Check if xfbin scene has a lightpoint color animation
+		if bpy.context.scene.get("xfbin_scene"):
+			xfbin_scene = bpy.context.scene.xfbin_scene
 
-		# Get the light's color, energy, location, radius, and cutoff for each frame
-		for frame in range(context.scene.frame_start, context.scene.frame_end + 1):
-			# Last sanity check to see if camera has animation data
-			if not lightpoint.animation_data:
-				continue
+			if bpy.context.scene.animation_data.action:
+				combined_fcurves += bpy.context.scene.animation_data.action.fcurves
+				light_start, light_end = bpy.context.scene.animation_data.action.frame_range
 
-			context.scene.frame_set(frame)
+		if lightpoint.animation_data.action:
+			combined_fcurves += lightpoint.animation_data.action.fcurves
+			light_start, light_end = lightpoint.animation_data.action.frame_range
 
-			colors.append(lightpoint.data.color.copy())
-			energies.append(lightpoint.data.energy)
-			translations.append(lightpoint.matrix_world.to_translation().copy())
-			radii.append(lightpoint.data.shadow_soft_size)
-			cutoffs.append(lightpoint.data.cutoff_distance if lightpoint.data.use_custom_distance else 0.0)
-		
+		if len(combined_fcurves) < 1:
+			return entries
 
-		# ------------------- entry -------------------
+		frame_end = light_end
+
+		light_fcurves = {
+			"xfbin_scene.lightpoint_color0": [{}, {}, {}],
+			"xfbin_scene.lightpoint_intensity0": [{}],
+			"xfbin_scene.lightpoint_range0": [{}],
+			"xfbin_scene.lightpoint_attenuation0": [{}],
+			"location": [{}, {}, {}]
+		}
+
+		color_frames: Set[int] = set()
+		intensity_frames: Set[int] = set()
+		range_frames: Set[int] = set()
+		attenuation_frames: Set[int] = set()
+		location_frames: Set[int] = set()
+
+		fcurve_mapping = {
+			"xfbin_scene.lightpoint_color0": (light_fcurves["xfbin_scene.lightpoint_color0"], color_frames),
+			"xfbin_scene.lightpoint_intensity0": (light_fcurves["xfbin_scene.lightpoint_intensity0"], intensity_frames),
+			"xfbin_scene.lightpoint_range0": (light_fcurves["xfbin_scene.lightpoint_range0"], range_frames),
+			"xfbin_scene.lightpoint_attenuation0": (light_fcurves["xfbin_scene.lightpoint_attenuation0"], attenuation_frames),
+			"location": (light_fcurves["location"], location_frames)
+		}
+
+		for fcurve in combined_fcurves:
+			for path, (target, frame_set) in fcurve_mapping.items():
+				if fcurve.data_path.endswith(path):
+					for i in range(int(frame_end + 1)):
+						light_fcurves[path][fcurve.array_index][i] = fcurve.evaluate(i)
+						frame_set.add(i)
+					break
+
+		def create_light_tracks(frame_values: Dict[int, List[float]], data_path, key_format, track_index):
+			track_header = TrackHeader(track_index=track_index, key_format=key_format)
+			track = Track()
+			last_values = [0] * len(frame_values[next(iter(frame_values))])
+
+			for frame, values in sorted(frame_values.items()):
+				for i, val in enumerate(values):
+					if val is not None:
+						last_values[i] = val
+				converted_value = convert_light_values(data_path, last_values, key_format, frame)
+				track.keys.append(converted_value)
+
+			# Dupe last keyframe
+			converted_value = convert_light_values(data_path, last_values, key_format, frame)
+			track.keys.append(converted_value)
+
+			track_header.frame_count = len(track.keys)
+			return track, track_header
+
+		def create_single_frame_track(data_path, key_format, track_index, value):
+			single_track_header = TrackHeader(track_index=track_index, key_format=key_format)
+			single_track = Track()
+			converted_value = convert_light_values(data_path, value, key_format)
+			single_track.keys.append(converted_value)
+			single_track_header.frame_count = 1
+			return single_track, single_track_header
+
+		colors = {frame: [light_fcurves["xfbin_scene.lightpoint_color0"][i].get(frame, None) for i in range(3)] for frame in color_frames}
+		intensities = {frame: [light_fcurves["xfbin_scene.lightpoint_intensity0"][0].get(frame, None)] for frame in intensity_frames}
+		ranges = {frame: [light_fcurves["xfbin_scene.lightpoint_range0"][0].get(frame, None)] for frame in range_frames}
+		attenuations = {frame: [light_fcurves["xfbin_scene.lightpoint_attenuation0"][0].get(frame, None)] for frame in attenuation_frames}
+		locations = {frame: [light_fcurves["location"][i].get(frame, None) for i in range(3)] for frame in location_frames}
+
 		entry = AnmEntry()
 		entry.coord = AnmCoord(-1, other_index)
 		entry.entry_format = EntryFormat.LightPoint
 
-		# ------------------- color -------------------
-		color_track_header = TrackHeader()
-		color_track = Track()
+		if len(color_frames) >= 1:
+			track, header = create_light_tracks(colors, "xfbin_scene.lightpoint_color0", NuccAnmKeyFormat.ColorRGBTable, 0)
+			while len(track.keys) % 4 != 0:
+				track.keys.append(track.keys[-1])
+			header.frame_count = len(track.keys)
+			entry.tracks.append(track)
+			entry.track_headers.append(header)
+		else:
+			track, header = create_single_frame_track("xfbin_scene.lightpoint_color0", NuccAnmKeyFormat.ColorRGBTable, 0, lightpoint.data.color)
+			entry.tracks.append(track)
+			entry.track_headers.append(header)
 
-		for value in colors:
-			color_track_header.track_index = 0
-			color_track_header.key_format = NuccAnmKeyFormat.ColorRGBTable
-			color_track_header.frame_count = len(colors)
+		if len(intensity_frames) >= 1:
+			track, header = create_light_tracks(intensities, "xfbin_scene.lightpoint_intensity0", NuccAnmKeyFormat.FloatTable, 1)
+			entry.tracks.append(track)
+			entry.track_headers.append(header)
+		else:
+			track, header = create_single_frame_track("xfbin_scene.lightpoint_intensity0", NuccAnmKeyFormat.FloatFixed, 1, [lightpoint.data.energy])
+			entry.tracks.append(track)
+			entry.track_headers.append(header)
 
-			converted_value: NuccAnmKey = convert_object_value("color", list(map(lambda x: round(x, 2), value[:])))
+		if len(location_frames) >= 1:
+			track, header = create_light_tracks(locations, "location", NuccAnmKeyFormat.Vector3Table, 2)
+			entry.tracks.append(track)
+			entry.track_headers.append(header)
+		else:
+			track, header = create_single_frame_track("location", NuccAnmKeyFormat.Vector3Fixed, 2, lightpoint.matrix_world.to_translation())
+			entry.tracks.append(track)
+			entry.track_headers.append(header)
 
-			color_track.keys.append(converted_value)
-		
-		
-		# Pad color_track.keys with the last value so the length is a multiple of 4
-		while len(color_track.keys) % 4 != 0:
-			color_track.keys.append(color_track.keys[-1])
+		if len(range_frames) >= 1:
+			track, header = create_light_tracks(ranges, "xfbin_scene.lightpoint_range0", NuccAnmKeyFormat.FloatTable, 4)
+			entry.tracks.append(track)
+			entry.track_headers.append(header)
+		else:
+			track, header = create_single_frame_track("xfbin_scene.lightpoint_range0", NuccAnmKeyFormat.FloatFixed, 4, [lightpoint.data.shadow_soft_size])
+			entry.tracks.append(track)
+			entry.track_headers.append(header)
 
-		# Update the frame count to reflect the new length
-		color_track_header.frame_count = len(color_track.keys)
-
-		entry.tracks.append(color_track)
-		entry.track_headers.append(color_track_header)
-
-		# ------------------- energy -------------------
-		energy_track_header = TrackHeader()
-		energy_track = Track()
-
-		for value in energies:
-			energy_track_header.track_index = 1
-			energy_track_header.key_format = NuccAnmKeyFormat.FloatTable
-			energy_track_header.frame_count = len(energies)
-
-			energy_track.keys.append(NuccAnmKey.Float(value))
-
-		entry.tracks.append(energy_track)
-		entry.track_headers.append(energy_track_header)
-
-		# ------------------- location -------------------
-		location_track_header = TrackHeader()
-		location_track = Track()
-
-		for frame, value in enumerate(translations):
-			location_track_header.track_index = 2
-			location_track_header.key_format = NuccAnmKeyFormat.Vector3Linear
-			location_track_header.frame_count = len(translations) + 1
-
-			converted_value: NuccAnmKey = convert_object_value("location", value[:], frame)
-
-			location_track.keys.append(converted_value)
-		
-		null_key = NuccAnmKey.Vec3Linear(-1, location_track.keys[-1].values)
-		location_track.keys.append(null_key)
-
-		entry.tracks.append(location_track)
-		entry.track_headers.append(location_track_header)
-
-		# ------------------- radius -------------------
-		radius_track_header = TrackHeader()
-		radius_track = Track()
-
-		for value in radii:
-			radius_track_header.track_index = 3
-			radius_track_header.key_format = NuccAnmKeyFormat.FloatTable
-			radius_track_header.frame_count = len(radii)
-
-			radius_track.keys.append(NuccAnmKey.Float(value))
-
-		entry.tracks.append(radius_track)
-		entry.track_headers.append(radius_track_header)
-
-		# ------------------- cutoff -------------------
-		cutoff_track_header = TrackHeader()
-		cutoff_track = Track()
-
-		for value in cutoffs:
-			cutoff_track_header.track_index = 4
-			cutoff_track_header.key_format = NuccAnmKeyFormat.FloatTable
-			cutoff_track_header.frame_count = len(cutoffs)
-
-			cutoff_track.keys.append(NuccAnmKey.Float(value))
-
-		entry.tracks.append(cutoff_track)
-		entry.track_headers.append(cutoff_track_header)
+		if len(attenuation_frames) >= 1:
+			track, header = create_light_tracks(attenuations, "xfbin_scene.lightpoint_attenuation0", NuccAnmKeyFormat.FloatTable, 3)
+			entry.tracks.append(track)
+			entry.track_headers.append(header)
+		else:
+			track, header = create_single_frame_track("xfbin_scene.lightpoint_attenuation0", NuccAnmKeyFormat.FloatFixed, 3, [lightpoint.data.cutoff_distance if lightpoint.data.use_custom_distance else 0.0])
+			entry.tracks.append(track)
+			entry.track_headers.append(header)
 
 		entries.append(entry)
-
-
 		return entries
 
-	def make_ambient_entries(self, ambient: bpy.types.Light, other_index: int) -> List[AnmEntry]:
-		context = bpy.context
+	def make_ambient_entries(self, other_index: int) -> List[AnmEntry]:
+		entries: List[AnmEntry] = []
 
-		entries: List[AnmEntry] = list()
+		light_start, light_end = 0, 0
+		combined_fcurves = []
 
-		colors: List[Vector] = list()
-		energies: List[float] = list()
+		# Check if xfbin scene has an ambient color animation
+		xfbin_scene = bpy.context.scene.get("xfbin_scene")
+  
+		if not xfbin_scene:
+			return entries
 
-		# Get the light's color and energy for each frame
-		for frame in range(context.scene.frame_start, context.scene.frame_end + 1):
-			# Last sanity check to see if camera has animation data
-			if not ambient.animation_data:
-				continue
+		if bpy.context.scene.animation_data.action:
+			combined_fcurves += bpy.context.scene.animation_data.action.fcurves
+			light_start, light_end = bpy.context.scene.animation_data.action.frame_range
+   
+		if len(combined_fcurves) < 1:
+			return entries
 
-			context.scene.frame_set(frame)
+		frame_end = light_end
+  
+		ambient_fcurves = {
+			"xfbin_scene.ambient_color": [{}, {}, {}],
+			"xfbin_scene.ambient_intensity": [{}]
+		}
+  
+		color_frames: Set[int] = set()
+		intensity_frames: Set[int] = set()
+  
+		fcurve_mapping = {
+			"xfbin_scene.ambient_color": (ambient_fcurves["xfbin_scene.ambient_color"], color_frames),
+			"xfbin_scene.ambient_intensity": (ambient_fcurves["xfbin_scene.ambient_intensity"], intensity_frames)
+		}
+  
+		for fcurve in combined_fcurves:
+			for path, (target, frame_set) in fcurve_mapping.items():
+				if fcurve.data_path.endswith(path):
+					for i in range(int(frame_end + 1)):
+						ambient_fcurves[path][fcurve.array_index][i] = fcurve.evaluate(i)
+						frame_set.add(i)
+					break
+ 
+		def create_ambient_tracks(frame_values: Dict[int, List[float]], data_path, key_format, track_index):
+			track_header = TrackHeader(track_index=track_index, key_format=key_format)
+			track = Track()
+			last_values = [0] * len(frame_values[next(iter(frame_values))])
 
-			colors.append(ambient.data.color.copy())
-			energies.append(ambient.data.energy)
+			for frame, values in sorted(frame_values.items()):
+				for i, val in enumerate(values):
+					if val is not None:
+						last_values[i] = val
+				converted_value = convert_light_values(data_path, last_values, key_format, frame)
+				track.keys.append(converted_value)
 
-		# ------------------- entry -------------------
+			# Dupe last keyframe
+			converted_value = convert_light_values(data_path, last_values, key_format, frame)
+			track.keys.append(converted_value)
+
+			track_header.frame_count = len(track.keys)
+			return track, track_header
+
+		colors = {frame: [ambient_fcurves["xfbin_scene.ambient_color"][i].get(frame, None) for i in range(3)] for frame in color_frames}
+		intensities = {frame: [ambient_fcurves["xfbin_scene.ambient_intensity"][0].get(frame, None)] for frame in intensity_frames}
+  
 		entry = AnmEntry()
 		entry.coord = AnmCoord(-1, other_index)
-
 		entry.entry_format = EntryFormat.Ambient
 
-		# ------------------- color -------------------
-		color_track_header = TrackHeader()
-		color_track = Track()
+		if len(color_frames) >= 1:
+			track, header = create_ambient_tracks(colors, "xfbin_scene.ambient_color", NuccAnmKeyFormat.ColorRGBTable, 0)
+			while len(track.keys) % 4 != 0:
+				track.keys.append(track.keys[-1])
+			header.frame_count = len(track.keys)
+			entry.tracks.append(track)
+			entry.track_headers.append(header)
+   
+			frame_values = {f: [1] for f in range(int(frame_end))}
+			track, header = create_ambient_tracks(frame_values, "xfbin_scene.ambient_intensity", NuccAnmKeyFormat.FloatTable, 1)
+			entry.tracks.append(track)
+			entry.track_headers.append(header)
 
-		for value in colors:
-			color_track_header.track_index = 0
-			color_track_header.key_format = NuccAnmKeyFormat.ColorRGBTable
-			color_track_header.frame_count = len(colors)
-
-			converted_value: NuccAnmKey = convert_object_value("color", list(map(lambda x: round(x, 2), value[:])))
-
-			color_track.keys.append(converted_value)
-		
-		# Pad color_track.keys with the last value so the length is a multiple of 4
-		while len(color_track.keys) % 4 != 0:
-			color_track.keys.append(color_track.keys[-1])
-
-		# Update the frame count to reflect the new length
-		color_track_header.frame_count = len(color_track.keys)
-
-		entry.tracks.append(color_track)
-		entry.track_headers.append(color_track_header)
-
-
-		# ------------------- energy -------------------
-		energy_track_header = TrackHeader()
-		energy_track = Track()
-
-		for value in energies:
-			energy_track_header.track_index = 1
-			energy_track_header.key_format = NuccAnmKeyFormat.FloatTable
-			energy_track_header.frame_count = len(energies)
-
-			energy_track.keys.append(NuccAnmKey.Float(value))
-		
-		entry.tracks.append(energy_track)
-		entry.track_headers.append(energy_track_header)
-
+		else:
+			# Create a single keyframe and take the default value
+			ambient_color = bpy.context.scene.xfbin_scene.ambient_color
+			frame_values = {f: ambient_color for f in range(int(frame_end))}
+			track, header = create_ambient_tracks(frame_values, "xfbin_scene.ambient_color", NuccAnmKeyFormat.ColorRGBTable, 0)
+   
+			while len(track.keys) % 4 != 0:
+				track.keys.append(track.keys[-1])	
+			header.frame_count = len(track.keys)
+			entry.tracks.append(track)
+			entry.track_headers.append(header)
+   
+			frame_values = {f: [1] for f in range(int(frame_end))}
+			track, header = create_ambient_tracks(frame_values, "xfbin_scene.ambient_intensity", NuccAnmKeyFormat.FloatTable, 1)
+			entry.tracks.append(track)
+			entry.track_headers.append(header)
+   
 		entries.append(entry)
-
-
 		return entries
+
 
 
 		
