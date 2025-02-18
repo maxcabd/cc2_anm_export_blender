@@ -66,3 +66,4 @@ class AnmArmatureInfo:
     
     def get_armature_info(self):
         return [self.clump_info, *self.coord_infos.values(), *self.model_infos.values(), *self.mat_infos.values()]
+
