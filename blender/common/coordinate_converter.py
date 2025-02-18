@@ -43,110 +43,144 @@ def fov_from_blender(sensor_width: float, lens: float) -> float:
 
 
 
-def convert_bone_value(anm_armature: AnmArmature, bone_name: str, data_path: str,
-					   track_header: TrackHeader, values: List[float], frame: int = 0) -> NuccAnmKey:
-	armature: Armature = anm_armature.armature
-
-	has_parent: bool = any(bone_name for bone in anm_armature.armature.data.bones if bone.parent)
-
-	edit_matrix: Matrix = get_edit_matrix(armature, bone_name)
-	
-
+def convert_bone_value(loc, rot, scale, data_path: str, track_header: TrackHeader, values: List[float], frame: int = 0) -> NuccAnmKey:
 	def translate(seq: List[float]) -> Tuple[float]:
-		loc, rot, _ = edit_matrix.decompose()
-		if has_parent:
-			
-			translation = Vector(seq)
-			translation.rotate(rot)
+		translation = Vector(seq)
+		translation.rotate(rot)
+		return tuple(pos_m_to_cm_tuple((loc + translation)))
 
-			return tuple(pos_m_to_cm_tuple((translation + loc)[:]))
-		else:
-			translation = Vector(seq)
-			return tuple(pos_m_to_cm_tuple(translation + loc)[:])
-		
-	
 	def rotate_euler(seq: List[float]) -> Tuple[int, int, int]:
-		_, rot, _ = edit_matrix.decompose()
-		if has_parent:
-			rotation = rot @ Euler(seq).to_quaternion().inverted().to_euler('ZYX')
-			rotation = rot_to_blender(rotation)
-			return tuple(rot_from_blender(rotation))
-		else:
-			rotation = Euler(seq).to_quaternion().inverted().to_euler('ZYX')
-			rotation = rot_to_blender(rotation)
-			return tuple(rot_from_blender(rotation))
-	
+		return tuple(math.degrees(x) for x in seq)
 
 	def rotate_quaternion(seq: List[float]) -> Tuple[int, int, int, int]:
-		_, rot, _ = edit_matrix.decompose()
-		if has_parent:
-			rotation = Quaternion(seq)
-			rotation = (rot @ rotation).inverted()
-			# Swizzle the quaternion to match the game's format to x, y, z, w
-			rotation = Quaternion((rotation.x, rotation.y, rotation.z, rotation.w))
-			return tuple(rotation)
-		else:
-			rotation = Quaternion(seq).inverted()
-			# Swizzle the quaternion to match the game's format to x, y, z, w
-			rotation = Quaternion((rotation.x, rotation.y, rotation.z, rotation.w))
-			return tuple(rotation)
-	
+		rotation = Quaternion(seq)
+		rotation = (rot @ rotation).inverted()
+		rotation = Quaternion((rotation.x, rotation.y, rotation.z, rotation.w))
+		return tuple(rotation)
+
+	def scale_vector(seq: List[float]) -> Tuple[float, float, float]:
+		new_scale = Vector(seq)
+		new_scale = scale * Vector(new_scale)
+		return tuple(new_scale)
+
 	match data_path, track_header.key_format:
 		case 'location', NuccAnmKeyFormat.Vector3Fixed:
 			return NuccAnmKey.Vec3(translate(values))
-		
 		case 'location', NuccAnmKeyFormat.Vector3Linear:
 			return NuccAnmKey.Vec3Linear(frame * 100, translate(values))
-		
-		case 'rotation_euler', NuccAnmKeyFormat.EulerXYZFixed:
+		case 'rotation_euler', NuccAnmKeyFormat.EulerXYZFixed | NuccAnmKeyFormat.EulerInterpolated:
 			return NuccAnmKey.Vec3(rotate_euler(values))
-		
 		case 'rotation_quaternion', NuccAnmKeyFormat.QuaternionLinear:
 			return NuccAnmKey.Vec4Linear(frame * 100, rotate_quaternion(values))
-		
 		case 'rotation_quaternion', NuccAnmKeyFormat.QuaternionShortTable:
-			return NuccAnmKey.ShortVec4(tuple([int(y * QUAT_COMPRESS) for y in rotate_quaternion(values)]))	
-		
+			return NuccAnmKey.ShortVec4(tuple([int(y * QUAT_COMPRESS) for y in rotate_quaternion(values)]))
 		case 'scale', NuccAnmKeyFormat.Vector3Linear:
-			scale = Vector([abs(seq) for seq in values])[:]
-			return NuccAnmKey.Vec3Linear(frame * 100, tuple(scale[:]))
-		
+			return NuccAnmKey.Vec3Linear(frame * 100, scale_vector(values))
 		case 'scale', NuccAnmKeyFormat.Vector3Fixed:
-			scale = Vector([abs(seq) for seq in values])[:]
-			return NuccAnmKey.Vec3(tuple(scale))
-		
+			return NuccAnmKey.Vec3(scale_vector(values))
 	return values
 
-
-def convert_object_value(data_path: str, values: List[float], frame: int = 0) -> NuccAnmKey:
-	"""
-	Used for converting objects that are not bones, such as cameras and lights.
-	
-	"""
+def convert_object_value(sensor_width, data_path: str, values: List[float], frame: int = 0) -> NuccAnmKey:
 	def translate(seq: List[float]) -> Tuple[float]:
-		return tuple(pos_m_to_cm_tuple(seq))
-	
-	def rotate_quaternion(seq: List[float]) -> Tuple[int, int, int, int]:
-		rotation = Quaternion(seq)
+		return tuple(s * 100 for s in seq)
 
-		# Swizzle the quaternion to match the game's format to x, y, z, w
-		rotation = Quaternion((-rotation.x, -rotation.y, -rotation.z, rotation.w))
-		rotation = tuple([int(y * QUAT_COMPRESS) for y in rotation])
+	def rotate_quaternion(seq: List[float]) -> Tuple[int, int, int, int]:
+		rotation = Quaternion(seq).inverted()
+		rotation = Quaternion((rotation.x, rotation.y, rotation.z, rotation.w))
 		return tuple(rotation)
-	
+
+	def rotate_euler(seq: List[float]) -> Tuple[int, int, int]:
+		rotation = Euler(seq).to_quaternion().inverted()
+		rotation = Quaternion((rotation.x, rotation.y, rotation.z, rotation.w))
+		return tuple(rotation)
+
+	def to_fov(sensor_width: float, lens: float) -> float:
+		return 2 * math.atan((0.5 * sensor_width) / lens) * 180 / math.pi
 
 	match data_path:
 		case 'location':
-			return NuccAnmKey.Vec3Linear(frame * 100, translate(values))
-		
+			return NuccAnmKey.Vec3Linear(int(frame) * 100, translate(values))
 		case 'rotation_quaternion':
-			return NuccAnmKey.ShortVec4(rotate_quaternion(values))
-		
+			return NuccAnmKey.Vec4Linear(int(frame) * 100, rotate_quaternion(values))
+		case 'rotation_euler':
+			return NuccAnmKey.Vec4Linear(int(frame) * 100, rotate_euler(values))
 		case 'fov':
-			return NuccAnmKey.FloatLinear(frame * 100, values[0])
-		
+			return NuccAnmKey.FloatLinear(int(frame) * 100, to_fov(sensor_width, values[0]))
 		case 'color':
 			color = [int(x * 255) for x in values]
 			return NuccAnmKey.Color(tuple(color))
-	
+	return values
+
+
+def convert_light_values(data_path, values, key_format = None, frame = 0) -> NuccAnmKey:
+	def translate(seq: List[float]):
+		return tuple(s * 100 for s in seq)
+
+	def rotate_quaternion(seq: List[float]) -> Tuple[int, int, int, int]:
+		rotation = Quaternion(seq).inverted()
+		rotation = Quaternion((rotation.x, rotation.y, rotation.z, rotation.w))
+		return tuple(int(x * QUAT_COMPRESS) for x in rotation)
+
+	def rotate_euler(seq: List[float]) -> Tuple[int, int, int]:
+		#invert the x axis
+		#seq = [seq[0], -seq[1], seq[2]]
+		rotation = Euler(seq).to_quaternion().inverted()
+		rotation = (rotation.x, rotation.y, rotation.z, rotation.w)
+		return tuple(int(x * QUAT_COMPRESS) for x in rotation)
+
+	match data_path, key_format:
+		case 'location', NuccAnmKeyFormat.Vector3Linear:
+			return NuccAnmKey.Vec3Linear(int(frame) * 100, translate(values))
+		case 'location', NuccAnmKeyFormat.Vector3Fixed:
+			return NuccAnmKey.Vec3(translate(values))
+		case 'location', NuccAnmKeyFormat.Vector3Table:
+			return NuccAnmKey.Vec3(translate(values))
+		case 'rotation_quaternion', NuccAnmKeyFormat.QuaternionShortTable:
+			return NuccAnmKey.ShortVec4(rotate_quaternion(values))
+		case 'rotation_euler', NuccAnmKeyFormat.QuaternionShortTable:
+			return NuccAnmKey.ShortVec4(rotate_euler(values))
+		case 'xfbin_scene.lightdir_color', NuccAnmKeyFormat.ColorRGBTable:
+			color = (int(x * 255) for x in values)
+			return NuccAnmKey.Color(tuple(color))
+		case "xfbin_scene.lightpoint_color0", NuccAnmKeyFormat.ColorRGBTable:
+			color = (int(x * 255) for x in values)
+			return NuccAnmKey.Color(tuple(color))
+		case "xfbin_scene.ambient_color", NuccAnmKeyFormat.ColorRGBTable:
+			color = (int(x * 255) for x in values)
+			return NuccAnmKey.Color(tuple(color))
+
+		case "xfbin_scene.lightdir_intensity", NuccAnmKeyFormat.FloatLinear:
+			return NuccAnmKey.Float(values[0])
+		case "xfbin_scene.lightdir_intensity", NuccAnmKeyFormat.FloatTable:
+			return NuccAnmKey.Float(values[0])
+		case "xfbin_scene.lightdir_intensity", NuccAnmKeyFormat.FloatFixed:
+			return NuccAnmKey.Float(values[0])
+
+		case "xfbin_scene.lightpoint_intensity0", NuccAnmKeyFormat.FloatLinear:
+			return NuccAnmKey.Float(values[0])
+		case "xfbin_scene.lightpoint_intensity0", NuccAnmKeyFormat.FloatTable:
+			return NuccAnmKey.Float(values[0])
+		case "xfbin_scene.lightpoint_intensity0", NuccAnmKeyFormat.FloatFixed:
+			return NuccAnmKey.Float(values[0])
+
+		case "xfbin_scene.lightpoint_range0", NuccAnmKeyFormat.FloatLinear:
+			return NuccAnmKey.Float(round(values[0]) * 100)
+		case "xfbin_scene.lightpoint_range0", NuccAnmKeyFormat.FloatTable:
+			return NuccAnmKey.Float(round(values[0]) * 100)
+		case "xfbin_scene.lightpoint_range0", NuccAnmKeyFormat.FloatFixed:
+			return NuccAnmKey.Float(round(values[0]) * 100)
+
+		case "xfbin_scene.lightpoint_attenuation0", NuccAnmKeyFormat.FloatLinear:
+			return NuccAnmKey.Float(round(values[0]))
+		case "xfbin_scene.lightpoint_attenuation0", NuccAnmKeyFormat.FloatTable:
+			return NuccAnmKey.Float(round(values[0]))
+		case "xfbin_scene.lightpoint_attenuation0", NuccAnmKeyFormat.FloatFixed:
+			return NuccAnmKey.Float(round(values[0]))
+
+		case "xfbin_scene.ambient_intensity", NuccAnmKeyFormat.FloatTable:
+			return NuccAnmKey.Float(values[0])
+
+		case _:
+			raise ValueError(f"Unsupported data path: {data_path}")
+
 	return values
