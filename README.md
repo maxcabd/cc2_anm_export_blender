@@ -11,13 +11,9 @@ Download the [latest release](https://github.com/maxcabd/cc2_anm_export_blender/
 
 Open the `Edit` -> `Preferences` window from the menu bar, go to `Add-ons`, click on the `Install` button, and select the release zip you downloaded. Then, enable the script by checking the box next to it.
 
-## Future Updates
-- Optimizations (Done)
-- Option to inject animations (Done)
-- Support for material animations (Done)
-- Support for light animations (Done)
 
 ## Credits
 - Thanks to [TheLeonX](https://www.youtube.com/c/TheLeonx) for supporting the project with importing / exporting correct bone transformations, material animations, and more.
 - A big thanks to [SutandoTsukai181](https://github.com/mosamadeeb) for his initial work on the animation importer and for reversing the animation tracks from the .xfbin files.
-- And HallucinatingGenius for his donations ❤️
+- Thanks to [Hydra](https://www.youtube.com/c/Al-Hydra) for his work on optimizations, cleaning the code, and more.
+
